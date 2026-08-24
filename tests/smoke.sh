@@ -516,6 +516,14 @@ assert.equal(page.headers.get("cache-control"), "no-store");
 const retired = await worker.fetch(new Request("https://drop.test/service-worker.js"), {});
 assert.match(await retired.text(), /client\.navigate\(client\.url\)/);
 assert.equal(retired.headers.get("cache-control"), "no-store, private, max-age=0");
+const fixture = await worker.fetch(new Request("https://drop.test/smoke-not-a-secret.toml.enc"), {});
+assert.equal(fixture.status, 200);
+assert.equal(fixture.headers.get("content-type"), "application/octet-stream");
+assert.equal(fixture.headers.get("cache-control"), "no-store, private, max-age=0");
+assert.deepEqual(
+  new Uint8Array(await fixture.arrayBuffer()),
+  new Uint8Array(await (await import("node:fs/promises")).readFile("smoke-not-a-secret.toml.enc")),
+);
 assert.ok(!(/console\.(log|error|warn)/).test(await (await import("node:fs/promises")).readFile("worker/index.mjs", "utf8")));
 console.log("PASS Worker auth, fragment capability, atomic lease, no-store payload, acknowledgement cleanup");
 NODE

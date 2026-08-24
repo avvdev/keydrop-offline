@@ -3,6 +3,7 @@ const MAX_BYTES = 16 * 1024 * 1024;
 const DEFAULT_TTL = 1800;
 const MAX_TTL = 43200;
 const LEASE_MS = 15 * 60 * 1000;
+const TEST_FIXTURE_BASE64 = "ekRLTzZYWVhpb2MG5RiPwa8aXbSjTZVbtuJ0j74NTnvAxmjRcxXycCtY4g2Ecw6p8Ll3u49nassBW7o368B7W2JCgPG10oUIXDoTBMOF+la+iCXCssbXw/i9+/hULx5G0xY=";
 
 export default {
   async fetch(request, env) {
@@ -18,6 +19,9 @@ export default {
       if (action) return await dispatchDrop(request, env, action);
       if (request.method === "GET" && url.pathname === "/service-worker.js") {
         return retiredServiceWorker();
+      }
+      if (request.method === "GET" && url.pathname === "/smoke-not-a-secret.toml.enc") {
+        return testFixture();
       }
       if (!env.ASSETS) return fail(404, "not_found");
       return secureAsset(await env.ASSETS.fetch(request), url.pathname);
@@ -227,6 +231,16 @@ function retiredServiceWorker() {
   return new Response(source, { headers: noStoreHeaders({
     "Content-Type": "text/javascript; charset=utf-8",
     "Service-Worker-Allowed": "/",
+  }) });
+}
+
+function testFixture() {
+  const encoded = atob(TEST_FIXTURE_BASE64);
+  const bytes = Uint8Array.from(encoded, (value) => value.charCodeAt(0));
+  return new Response(bytes, { headers: noStoreHeaders({
+    "Content-Type": "application/octet-stream",
+    "Content-Length": String(bytes.length),
+    "X-Content-Type-Options": "nosniff",
   }) });
 }
 
