@@ -12,10 +12,10 @@ export default {
         return json({ ok: true });
       }
       if (request.method === "POST" && url.pathname === "/api/v1/drops") {
-        return upload(request, env);
+        return await upload(request, env);
       }
       const action = apiAction(request.method, url.pathname);
-      if (action) return dispatchDrop(request, env, action);
+      if (action) return await dispatchDrop(request, env, action);
       if (request.method === "GET" && url.pathname === "/service-worker.js") {
         return retiredServiceWorker();
       }
@@ -44,13 +44,13 @@ export class DropSession {
 
   async init(request) {
     const state = await request.json();
+    await this.ctx.storage.setAlarm(state.expiresAt);
     const created = await this.ctx.storage.transaction(async (tx) => {
       if (await tx.get("drop")) return false;
       await tx.put("drop", { ...state, status: "available" });
       return true;
     });
     if (!created) return fail(409, "exists");
-    await this.ctx.storage.setAlarm(state.expiresAt);
     return new Response(null, { status: 204 });
   }
 
@@ -78,39 +78,52 @@ export class DropSession {
   }
 
   async payload(request) {
-    const state = await this.ctx.storage.get("drop");
-    if (!state || !(await this.hasLease(request, state))) return fail(410, "gone");
-    if (state.expiresAt <= Date.now()) {
-      await this.cleanup(state);
+    const result = await this.authorize(request, false);
+    if (result.expired) await this.cleanup(result.expired);
+    if (!result.state) return fail(410, "gone");
+    const object = await this.env.DROPS.get(result.state.r2Key);
+    if (!object) {
+      await this.cleanup(result.state);
       return fail(410, "gone");
     }
-    const object = await this.env.DROPS.get(state.r2Key);
-    if (!object) return fail(410, "gone");
     return new Response(object.body, {
       headers: noStoreHeaders({
         "Content-Type": "application/octet-stream",
-        "Content-Length": String(state.size),
-        "X-Keydrop-SHA256": state.sha256,
+        "Content-Length": String(result.state.size),
+        "X-Keydrop-SHA256": result.state.sha256,
         "X-Content-Type-Options": "nosniff",
       }),
     });
   }
 
   async ack(request) {
-    const state = await this.ctx.storage.get("drop");
-    if (!state || !(await this.hasLease(request, state))) return fail(410, "gone");
-    state.status = "consumed";
-    delete state.leaseHash;
-    delete state.leaseUntil;
-    await this.ctx.storage.put("drop", state);
-    await this.env.DROPS.delete(state.r2Key);
+    const result = await this.authorize(request, true);
+    if (result.expired) await this.cleanup(result.expired);
+    if (!result.state) return fail(410, "gone");
+    await this.env.DROPS.delete(result.state.r2Key);
     return new Response(null, { status: 204, headers: noStoreHeaders() });
   }
 
-  async hasLease(request, state) {
+  async authorize(request, consume) {
     const lease = request.headers.get("x-keydrop-lease") || "";
-    return TOKEN_RE.test(lease) && state.status === "leased" &&
-      state.leaseUntil >= Date.now() && state.leaseHash === await sha256Hex(lease);
+    if (!TOKEN_RE.test(lease)) return {};
+    const leaseHash = await sha256Hex(lease);
+    const now = Date.now();
+    return this.ctx.storage.transaction(async (tx) => {
+      const state = await tx.get("drop");
+      if (!state) return {};
+      if (state.expiresAt <= now) return { expired: state };
+      if (state.status !== "leased" || state.leaseUntil <= now || state.leaseHash !== leaseHash) return {};
+      if (consume) {
+        state.status = "consumed";
+        delete state.leaseHash;
+        delete state.leaseUntil;
+      } else {
+        state.leaseUntil = Math.min(state.expiresAt, now + LEASE_MS);
+      }
+      await tx.put("drop", state);
+      return { state };
+    });
   }
 
   async cleanup(state) {
@@ -140,29 +153,29 @@ async function upload(request, env) {
   const digest = await sha256Hex(token);
   const r2Key = `drops/${digest}`;
   const expiresAt = Date.now() + ttl * 1000;
-  const stored = await env.DROPS.put(r2Key, request.body, {
-    customMetadata: { expiresAt: String(expiresAt) },
-    httpMetadata: { contentType: "application/octet-stream" },
-    sha256: hexBytes(checksum).buffer,
-  });
-  if (!stored || stored.size !== size) {
-    await env.DROPS.delete(r2Key);
-    return fail(400, "invalid_size");
+  let initialized = false;
+  try {
+    const stored = await env.DROPS.put(r2Key, request.body, {
+      customMetadata: { expiresAt: String(expiresAt) },
+      httpMetadata: { contentType: "application/octet-stream" },
+      sha256: hexBytes(checksum).buffer,
+    });
+    if (!stored || stored.size !== size) return fail(400, "invalid_size");
+    const stub = env.DROP_SESSIONS.get(env.DROP_SESSIONS.idFromName(digest));
+    const response = await stub.fetch(new Request("https://drop.internal/init", {
+      method: "POST",
+      body: JSON.stringify({ r2Key, expiresAt, size: stored.size, sha256: checksum }),
+    }));
+    if (!response.ok) return fail(503, "state_unavailable");
+    initialized = true;
+    return json({
+      url: `${new URL(request.url).origin}/#${token}`,
+      expiresAt: new Date(expiresAt).toISOString(),
+      sha256: checksum,
+    }, 201);
+  } finally {
+    if (!initialized) await env.DROPS.delete(r2Key);
   }
-  const stub = env.DROP_SESSIONS.get(env.DROP_SESSIONS.idFromName(digest));
-  const initialized = await stub.fetch(new Request("https://drop.internal/init", {
-    method: "POST",
-    body: JSON.stringify({ r2Key, expiresAt, size: stored.size, sha256: checksum }),
-  }));
-  if (!initialized.ok) {
-    await env.DROPS.delete(r2Key);
-    return fail(503, "state_unavailable");
-  }
-  return json({
-    url: `${new URL(request.url).origin}/#${token}`,
-    expiresAt: new Date(expiresAt).toISOString(),
-    sha256: checksum,
-  }, 201);
 }
 
 async function dispatchDrop(request, env, action) {
@@ -210,7 +223,7 @@ function secureAsset(response, path) {
 }
 
 function retiredServiceWorker() {
-  const source = `self.addEventListener("install",()=>self.skipWaiting());self.addEventListener("activate",event=>event.waitUntil(Promise.all([caches.keys().then(keys=>Promise.all(keys.map(key=>caches.delete(key)))),self.registration.unregister(),self.clients.claim()])));`;
+  const source = `self.addEventListener("install",()=>self.skipWaiting());self.addEventListener("activate",event=>event.waitUntil((async()=>{await Promise.all((await caches.keys()).map(key=>caches.delete(key)));await self.clients.claim();const windows=await self.clients.matchAll({type:"window",includeUncontrolled:true});await self.registration.unregister();await Promise.allSettled(windows.map(client=>client.navigate(client.url)))})()));`;
   return new Response(source, { headers: noStoreHeaders({
     "Content-Type": "text/javascript; charset=utf-8",
     "Service-Worker-Allowed": "/",

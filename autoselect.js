@@ -39,20 +39,31 @@ async function startProduction() {
   if (tokenPattern.test(fragment)) {
     const replacement = `${location.pathname}${location.search || ""}`;
     history.replaceState(null, "", replacement);
-    saved = { token: fragment, lease: randomToken() };
+    saved = { token: fragment, lease: randomToken(), phase: "fetch" };
     writeActiveDrop(saved);
   }
   if (!saved || !tokenPattern.test(saved.token) || !tokenPattern.test(saved.lease)) return;
 
   activeDrop = saved;
   setProductionMode();
+  if (saved.phase === "ack") {
+    pageStatus.textContent = "Завершаю одноразовую передачу…";
+    await finishDrop(saved);
+    return;
+  }
   observeSuccessfulDecrypt();
   encryptedFileInfo.textContent = "Получаю зашифрованный файл…";
   try {
     const claim = await dropRequest("/api/v1/drop/claim", "POST", saved);
-    if (!claim.ok) throw new Error(claim.status === 410 ? "Ссылка уже использована или истекла" : "Не удалось получить файл");
+    if (!claim.ok) {
+      if (claim.status === 410) clearActiveDrop();
+      throw new Error(claim.status === 410 ? "Ссылка уже использована или истекла" : "Не удалось получить файл");
+    }
     const response = await dropRequest("/api/v1/drop", "GET", saved);
-    if (!response.ok) throw new Error(response.status === 410 ? "Ссылка уже использована или истекла" : "Не удалось получить файл");
+    if (!response.ok) {
+      if (response.status === 410) clearActiveDrop();
+      throw new Error(response.status === 410 ? "Ссылка уже использована или истекла" : "Не удалось получить файл");
+    }
     const size = Number(response.headers.get("content-length"));
     if (!Number.isSafeInteger(size) || size < 1 || size > 16 * 1024 * 1024) throw new Error("Недопустимый размер файла");
     const bytes = await response.arrayBuffer();
@@ -87,13 +98,26 @@ function observeSuccessfulDecrypt() {
   const observer = new MutationObserver(() => {
     if (pageStatus.textContent !== "Готово. Файл расшифрован на этом устройстве." || !activeDrop) return;
     const completed = activeDrop;
-    activeDrop = null;
+    completed.phase = "ack";
+    writeActiveDrop(completed);
     observer.disconnect();
-    dropRequest("/api/v1/drop/ack", "POST", completed).then((response) => {
-      if (response.ok) clearActiveDrop();
-    }).catch(() => {});
+    finishDrop(completed);
   });
   observer.observe(pageStatus, { childList: true });
+}
+
+async function finishDrop(drop) {
+  try {
+    const response = await dropRequest("/api/v1/drop/ack", "POST", drop);
+    if (response.ok || response.status === 410) {
+      clearActiveDrop();
+      activeDrop = null;
+      pageStatus.textContent = "Готово. Серверная копия удалена.";
+      return;
+    }
+  } catch {}
+  pageStatus.textContent = "Файл расшифрован. Удаление серверной копии повторится при следующем открытии.";
+  pageStatus.dataset.error = "true";
 }
 
 function dropRequest(path, method, drop) {
@@ -107,6 +131,7 @@ function dropRequest(path, method, drop) {
     credentials: "omit",
     redirect: "error",
     referrerPolicy: "no-referrer",
+    keepalive: path.endsWith("/ack"),
   });
 }
 

@@ -415,13 +415,38 @@ const winner = leases[claims.findIndex((response) => response.status === 204)];
 assert.equal((await worker.fetch(access("POST", "/api/v1/drop/claim", token, winner), env)).status, 204);
 assert.equal((await worker.fetch(access("GET", "/api/v1/drop", token, lease()), env)).status, 410);
 
-const payload = await worker.fetch(access("GET", "/api/v1/drop", token, winner), env);
+const session = sessions.sessions.get(storedKey.slice("drops/".length));
+const expiredLease = await session.ctx.storage.get("drop");
+expiredLease.leaseUntil = Date.now() - 1;
+await session.ctx.storage.put("drop", expiredLease);
+const replacement = lease();
+assert.equal((await worker.fetch(access("POST", "/api/v1/drop/claim", token, replacement), env)).status, 204);
+assert.equal((await worker.fetch(access("POST", "/api/v1/drop/ack", token, winner), env)).status, 410);
+
+const payload = await worker.fetch(access("GET", "/api/v1/drop", token, replacement), env);
 assert.equal(payload.status, 200);
 assert.equal(payload.headers.get("cache-control"), "no-store, private, max-age=0");
 assert.deepEqual(new Uint8Array(await payload.arrayBuffer()), ciphertext);
-assert.equal((await worker.fetch(access("POST", "/api/v1/drop/ack", token, winner), env)).status, 204);
+assert.equal((await worker.fetch(access("POST", "/api/v1/drop/ack", token, replacement), env)).status, 204);
 assert.equal(bucket.values.size, 0);
-assert.equal((await worker.fetch(access("GET", "/api/v1/drop", token, winner), env)).status, 410);
+assert.equal((await worker.fetch(access("GET", "/api/v1/drop", token, replacement), env)).status, 410);
+
+const failedBucket = new Bucket();
+const failedEnv = {
+  DROPS: failedBucket,
+  UPLOAD_TOKEN: secret,
+  DROP_SESSIONS: { idFromName(value) { return value; }, get() { return { async fetch() { throw new Error("do unavailable"); } }; } },
+};
+const failedUpload = await worker.fetch(new Request("https://drop.test/api/v1/drops", {
+  method: "POST", body: ciphertext,
+  headers: {
+    Authorization: `Bearer ${secret}`, "Content-Length": String(ciphertext.length),
+    "X-Keydrop-SHA256": checksum, "X-Keydrop-TTL": "300",
+  },
+}), failedEnv);
+assert.equal(failedUpload.status, 500);
+assert.equal(failedUpload.headers.get("cache-control"), "no-store, private, max-age=0");
+assert.equal(failedBucket.values.size, 0);
 
 const assets = {
   async fetch() { return new Response("<html></html>", { headers: { "Content-Type": "text/html" } }); },
@@ -430,6 +455,9 @@ const page = await worker.fetch(new Request("https://drop.test/"), { ASSETS: ass
 assert.match(page.headers.get("content-security-policy"), /frame-ancestors 'none'/);
 assert.equal(page.headers.get("referrer-policy"), "no-referrer");
 assert.equal(page.headers.get("cache-control"), "no-store");
+const retired = await worker.fetch(new Request("https://drop.test/service-worker.js"), {});
+assert.match(await retired.text(), /client\.navigate\(client\.url\)/);
+assert.equal(retired.headers.get("cache-control"), "no-store, private, max-age=0");
 assert.ok(!(/console\.(log|error|warn)/).test(await (await import("node:fs/promises")).readFile("worker/index.mjs", "utf8")));
 console.log("PASS Worker auth, fragment capability, atomic lease, no-store payload, acknowledgement cleanup");
 NODE
@@ -471,6 +499,7 @@ const calls = [];
 const stored = new Map();
 const observers = [];
 let replacedWith = null;
+let ackAttempts = 0;
 
 const context = {
   Blob,
@@ -492,13 +521,17 @@ const context = {
   fetch: async (path, options) => {
     calls.push({ path, options });
     if (path.endsWith("/claim")) return new Response(null, { status: 204 });
-    if (path.endsWith("/ack")) return new Response(null, { status: 204 });
+    if (path.endsWith("/ack")) {
+      ackAttempts += 1;
+      if (ackAttempts === 1) throw new Error("response lost");
+      return new Response(null, { status: 410 });
+    }
     return new Response(encrypted, { headers: {
       "Content-Length": String(encrypted.length),
       "X-Keydrop-SHA256": checksum,
     } });
   },
-  history: { replaceState(_state, _title, path) { replacedWith = path; } },
+  history: { replaceState(_state, _title, path) { replacedWith = path; context.location.hash = ""; } },
   location: { hash: `#${token}`, pathname: "/", search: "" },
   sessionStorage: {
     getItem(key) { return stored.get(key) ?? null; },
@@ -529,6 +562,14 @@ observers[0].callback();
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(calls.length, 3);
 assert.equal(calls[2].path, "/api/v1/drop/ack");
+assert.equal(calls[2].options.keepalive, true);
+assert.equal(JSON.parse(stored.get("keydrop-active-v1")).phase, "ack");
+assert.match(elements["#status"].textContent, /повторится/);
+
+await vm.runInContext("startProduction()", context);
+assert.equal(calls.length, 4);
+assert.equal(calls[3].path, "/api/v1/drop/ack");
 assert.equal(stored.size, 0);
-console.log("PASS fragment erased, one payload fetch, in-memory selection, post-decrypt acknowledgement");
+assert.equal(elements["#status"].textContent, "Готово. Серверная копия удалена.");
+console.log("PASS fragment erased, one payload fetch, in-memory selection, recoverable acknowledgement");
 NODE
