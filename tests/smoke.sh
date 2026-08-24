@@ -12,6 +12,14 @@ grep -Fx '*' .assetsignore >/dev/null
 for private_path in keydrop cli tests worker .git service-worker.js; do
   ! grep -Fx "!${private_path}" .assetsignore >/dev/null
 done
+grep -F '"directory": "./public"' worker/wrangler.jsonc >/dev/null
+test "$(find worker/public -maxdepth 1 -type f -printf '%f\n' | sort)" = "$(printf '%s\n' autoselect.js decrypt.bundle.js icon.svg index.html manifest.webmanifest | sort)"
+for public_asset in autoselect.js decrypt.bundle.js icon.svg index.html manifest.webmanifest; do
+  cmp "worker/public/${public_asset}" "${public_asset}"
+done
+test ! -e worker/public/smoke-not-a-secret.toml.enc
+grep -Fx '.dev.vars' worker/.gitignore >/dev/null
+grep -Fx '.wrangler/' worker/.gitignore >/dev/null
 
 node <<'NODE'
 const assert = require("node:assert/strict");

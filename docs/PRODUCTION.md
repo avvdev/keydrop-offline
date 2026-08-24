@@ -50,7 +50,7 @@ WRANGLER_SEND_METRICS=false npx --yes wrangler@4.125.0 deploy \
   --outdir /home/node/.local/state/keydrop/wrangler-dry-run
 ```
 
-The config must show bindings `DROP_SESSIONS`, `DROPS`, and `ASSETS`. `.assetsignore` is deny-by-default. Only these six assets may be public:
+The config must show bindings `DROP_SESSIONS`, `DROPS`, and `ASSETS`. Wrangler reads only the dedicated `worker/public` directory. It must report `Read 5 files`, matching this exact static allowlist:
 
 ```text
 autoselect.js
@@ -58,10 +58,21 @@ decrypt.bundle.js
 icon.svg
 index.html
 manifest.webmanifest
-smoke-not-a-secret.toml.enc
 ```
 
-Wrangler may report how many paths it scanned before ignore rules; that number is not the public count. Run with `WRANGLER_LOG=debug` when auditing and verify that `keydrop`, `cli`, `tests`, `worker`, `.git`, and `service-worker.js` are all logged as ignored.
+`smoke-not-a-secret.toml.enc` is an explicitly harmless fixture served by a fixed Worker route and checked against its pinned SHA-256 by the smoke test; it is not copied into the static directory. The root `.assetsignore` remains a secondary deny-by-default guard for GitHub Pages tooling, but production Worker publication does not depend on it.
+
+For local Miniflare development, use an isolated `worker/.dev.vars`; it is ignored by Git. Never enable process-environment injection, because unrelated VPS secrets could become Worker bindings:
+
+```bash
+umask 077
+printf 'UPLOAD_TOKEN=' > worker/.dev.vars
+openssl rand -hex 32 >> worker/.dev.vars
+CLOUDFLARE_INCLUDE_PROCESS_ENV=false WRANGLER_SEND_METRICS=false \
+  npx --yes wrangler@4.125.0 dev --config worker/wrangler.jsonc
+```
+
+After stopping Wrangler, remove the local-only credential with `unlink worker/.dev.vars`. Do not use `CLOUDFLARE_INCLUDE_PROCESS_ENV=true` for this project.
 
 ## 3. Deploy and verify
 
