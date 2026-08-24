@@ -35,9 +35,9 @@ Limits: ciphertext is at most 16 MiB, TTL is 5 minutes to 12 hours, and the R2 l
 
 The generated `keydrop` and `decrypt.bundle.js` include `libsodium-wrappers-sumo` / `libsodium-sumo` 0.8.4 under the ISC license:
 
-Copyright (c) 2015-2026  
-Ahmad Ben Mrad &lt;batikhsouri at gmail dot org&gt;  
-Frank Denis &lt;j at pureftpd dot org&gt;  
+Copyright (c) 2015-2026<br>
+Ahmad Ben Mrad &lt;batikhsouri at gmail dot org&gt;<br>
+Frank Denis &lt;j at pureftpd dot org&gt;<br>
 Ryan Lester &lt;ryan at cyph dot com&gt;
 
 Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies.
