@@ -32,6 +32,9 @@ grep -Fx '.wrangler/' worker/.gitignore >/dev/null
 test -x scripts/live-canary.mjs
 node --check scripts/live-canary.mjs
 test "$(node scripts/live-canary.mjs --help)" = "usage: node scripts/live-canary.mjs --endpoint URL --token-file FILE"
+test -x scripts/check-keydrop-build.sh
+bash scripts/check-keydrop-build.sh
+test "$(./keydrop --help 2>&1)" = "usage: keydrop send FILE|- --endpoint URL --token-file FILE --password-out FILE [--ttl SECONDS]"
 
 node <<'NODE'
 const assert = require("node:assert/strict");

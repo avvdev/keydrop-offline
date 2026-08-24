@@ -7,6 +7,7 @@ const SIGNATURE = new TextEncoder().encode("zDKO6XYXioc");
 const SALT_BYTES = 16, HEADER_BYTES = 24, AUTH_BYTES = 17;
 const MAX_CIPHERTEXT = 16 * 1024 * 1024, MAX_PLAINTEXT = MAX_CIPHERTEXT - SIGNATURE.length - SALT_BYTES - HEADER_BYTES - AUTH_BYTES;
 const TOKEN_RE = /^[A-Za-z0-9._~-]{32,512}$/, DELIVERY_RE = /^[A-Za-z0-9_-]{43}$/, ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const USAGE = "usage: keydrop send FILE|- --endpoint URL --token-file FILE --password-out FILE [--ttl SECONDS]";
 let incompletePassword;
 
 process.umask(0o077);
@@ -24,8 +25,9 @@ function stop(code) {
 }
 
 function parse(argv) {
+  if (argv.length === 1 && ["-h", "--help"].includes(argv[0])) return null;
   if (argv[0] !== "send" || !argv[1] || argv[1].startsWith("--")) {
-    throw new Error("usage: keydrop send FILE|- --endpoint URL --token-file FILE --password-out FILE [--ttl SECONDS]");
+    throw new Error(USAGE);
   }
   const options = { input: argv[1], ttl: 1800 }, seen = new Set();
   for (let index = 2; index < argv.length; index += 2) {
@@ -244,6 +246,10 @@ async function limitedBody(response, limit) {
 
 async function main() {
   const options = parse(process.argv.slice(2));
+  if (!options) {
+    process.stdout.write(`${USAGE}\n`);
+    return;
+  }
   const origin = endpoint(options.endpoint);
   let cleartext;
   let ciphertext;

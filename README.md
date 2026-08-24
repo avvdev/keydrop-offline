@@ -15,6 +15,7 @@ The repository contains:
 - `keydrop`: standalone Node.js 22 CLI; stdout is only the delivery URL;
 - `worker/`: Cloudflare Worker, private R2 binding, and Durable Object lease state;
 - `index.html`, `autoselect.js`, `decrypt.bundle.js`: same-origin browser receiver;
+- `scripts/check-keydrop-build.sh`: pinned, integrity-checked, ephemeral CLI rebuild;
 - `tests/smoke.sh`: crypto round-trip, secret-lifecycle, race, API, and browser-flow tests.
 
 Run the local suite from the repository root:
@@ -22,6 +23,8 @@ Run the local suite from the repository root:
 ```bash
 bash tests/smoke.sh
 ```
+
+The suite builds `cli/keydrop.mjs` in a temporary directory with exact versions of `esbuild-wasm` and libsodium, verifies their registry SHA-512 values, and compares the result byte-for-byte with tracked `keydrop`. It leaves no dependency manifest or `node_modules` in the repository.
 
 No Cloudflare resource is created by the tests. Production bootstrap, deployment, manual use, automation, rollback, and cleanup are documented in [docs/PRODUCTION.md](docs/PRODUCTION.md).
 
