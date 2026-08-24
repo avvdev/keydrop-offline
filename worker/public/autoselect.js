@@ -109,10 +109,17 @@ function observeSuccessfulDecrypt() {
 async function finishDrop(drop) {
   try {
     const response = await dropRequest("/api/v1/drop/ack", "POST", drop);
-    if (response.ok || response.status === 410) {
+    if (response.ok) {
       clearActiveDrop();
       activeDrop = null;
       pageStatus.textContent = "Готово. Серверная копия удалена.";
+      return;
+    }
+    if (response.status === 410) {
+      clearActiveDrop();
+      activeDrop = null;
+      pageStatus.textContent = "Файл расшифрован. Ссылка уже закрыта; немедленное удаление серверной копии не подтверждено.";
+      pageStatus.dataset.error = "true";
       return;
     }
   } catch {}

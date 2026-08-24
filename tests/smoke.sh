@@ -393,7 +393,7 @@ class Storage {
 }
 
 class Bucket {
-  constructor() { this.values = new Map(); }
+  constructor() { this.values = new Map(); this.failDeleteOnce = false; }
   async put(key, body, options) {
     const bytes = new Uint8Array(await new Response(body).arrayBuffer());
     this.values.set(key, { bytes, options });
@@ -403,7 +403,13 @@ class Bucket {
     const value = this.values.get(key);
     return value ? { body: new Blob([value.bytes]).stream() } : null;
   }
-  async delete(key) { this.values.delete(key); }
+  async delete(key) {
+    if (this.failDeleteOnce) {
+      this.failDeleteOnce = false;
+      throw new Error("temporary R2 delete failure");
+    }
+    this.values.delete(key);
+  }
 }
 
 class Sessions {
@@ -498,7 +504,24 @@ assert.equal(payload.headers.get("cache-control"), "no-store, private, max-age=0
 assert.deepEqual(new Uint8Array(await payload.arrayBuffer()), ciphertext);
 assert.equal((await worker.fetch(access("POST", "/api/v1/drop/ack", token, replacement), env)).status, 204);
 assert.equal(bucket.values.size, 0);
+assert.equal((await worker.fetch(access("POST", "/api/v1/drop/ack", token, replacement), env)).status, 204);
 assert.equal((await worker.fetch(access("GET", "/api/v1/drop", token, replacement), env)).status, 410);
+
+const retryUpload = await worker.fetch(new Request("https://drop.test/api/v1/drops", {
+  method: "POST", body: ciphertext,
+  headers: {
+    Authorization: `Bearer ${secret}`, "Content-Length": String(ciphertext.length),
+    "X-Keydrop-SHA256": checksum, "X-Keydrop-TTL": "300",
+  },
+}), env);
+const retryToken = new URL((await retryUpload.json()).url).hash.slice(1);
+const retryLease = lease();
+assert.equal((await worker.fetch(access("POST", "/api/v1/drop/claim", retryToken, retryLease), env)).status, 204);
+bucket.failDeleteOnce = true;
+assert.equal((await worker.fetch(access("POST", "/api/v1/drop/ack", retryToken, retryLease), env)).status, 500);
+assert.equal(bucket.values.size, 1);
+assert.equal((await worker.fetch(access("POST", "/api/v1/drop/ack", retryToken, retryLease), env)).status, 204);
+assert.equal(bucket.values.size, 0);
 
 const failedBucket = new Bucket();
 const failedEnv = {
@@ -601,7 +624,7 @@ const context = {
     if (path.endsWith("/ack")) {
       ackAttempts += 1;
       if (ackAttempts === 1) throw new Error("response lost");
-      return new Response(null, { status: 410 });
+      return new Response(null, { status: 204 });
     }
     return new Response(encrypted, { headers: {
       "Content-Length": String(encrypted.length),
@@ -648,5 +671,12 @@ assert.equal(calls.length, 4);
 assert.equal(calls[3].path, "/api/v1/drop/ack");
 assert.equal(stored.size, 0);
 assert.equal(elements["#status"].textContent, "Готово. Серверная копия удалена.");
+
+stored.set("keydrop-active-v1", JSON.stringify({ token, lease: randomBytes(32).toString("base64url"), phase: "ack" }));
+context.fetch = async () => new Response(null, { status: 410 });
+await vm.runInContext("startProduction()", context);
+assert.equal(stored.size, 0);
+assert.match(elements["#status"].textContent, /не подтверждено/);
+assert.equal(elements["#status"].dataset.error, "true");
 console.log("PASS fragment erased, one payload fetch, in-memory selection, recoverable acknowledgement");
 NODE

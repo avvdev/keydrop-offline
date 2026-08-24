@@ -67,7 +67,7 @@ export class DropSession {
       const state = await tx.get("drop");
       if (!state) return { status: 410 };
       if (state.expiresAt <= now) return { status: 410, expired: state };
-      if (state.status === "consumed") return { status: 410 };
+      if (state.status === "consuming" || state.status === "consumed") return { status: 410 };
       if (state.status === "leased" && state.leaseUntil > now && state.leaseHash !== leaseHash) {
         return { status: 410 };
       }
@@ -82,7 +82,7 @@ export class DropSession {
   }
 
   async payload(request) {
-    const result = await this.authorize(request, false);
+    const result = await this.authorizePayload(request);
     if (result.expired) await this.cleanup(result.expired);
     if (!result.state) return fail(410, "gone");
     const object = await this.env.DROPS.get(result.state.r2Key);
@@ -101,14 +101,22 @@ export class DropSession {
   }
 
   async ack(request) {
-    const result = await this.authorize(request, true);
+    const result = await this.beginAck(request);
     if (result.expired) await this.cleanup(result.expired);
     if (!result.state) return fail(410, "gone");
-    await this.env.DROPS.delete(result.state.r2Key);
+    if (!result.consumed) {
+      await this.env.DROPS.delete(result.state.r2Key);
+      await this.ctx.storage.transaction(async (tx) => {
+        const state = await tx.get("drop");
+        if (!state || state.status !== "consuming" || state.ackLeaseHash !== result.leaseHash) return;
+        state.status = "consumed";
+        await tx.put("drop", state);
+      });
+    }
     return new Response(null, { status: 204, headers: noStoreHeaders() });
   }
 
-  async authorize(request, consume) {
+  async authorizePayload(request) {
     const lease = request.headers.get("x-keydrop-lease") || "";
     if (!TOKEN_RE.test(lease)) return {};
     const leaseHash = await sha256Hex(lease);
@@ -118,15 +126,34 @@ export class DropSession {
       if (!state) return {};
       if (state.expiresAt <= now) return { expired: state };
       if (state.status !== "leased" || state.leaseUntil <= now || state.leaseHash !== leaseHash) return {};
-      if (consume) {
-        state.status = "consumed";
-        delete state.leaseHash;
-        delete state.leaseUntil;
-      } else {
-        state.leaseUntil = Math.min(state.expiresAt, now + LEASE_MS);
-      }
+      state.leaseUntil = Math.min(state.expiresAt, now + LEASE_MS);
       await tx.put("drop", state);
       return { state };
+    });
+  }
+
+  async beginAck(request) {
+    const lease = request.headers.get("x-keydrop-lease") || "";
+    if (!TOKEN_RE.test(lease)) return {};
+    const leaseHash = await sha256Hex(lease);
+    const now = Date.now();
+    return this.ctx.storage.transaction(async (tx) => {
+      const state = await tx.get("drop");
+      if (!state) return {};
+      if (state.expiresAt <= now) return { expired: state };
+      if (state.status === "consumed" && state.ackLeaseHash === leaseHash) {
+        return { state, leaseHash, consumed: true };
+      }
+      if (state.status === "consuming" && state.ackLeaseHash === leaseHash) {
+        return { state, leaseHash, consumed: false };
+      }
+      if (state.status !== "leased" || state.leaseHash !== leaseHash) return {};
+      state.status = "consuming";
+      state.ackLeaseHash = leaseHash;
+      delete state.leaseHash;
+      delete state.leaseUntil;
+      await tx.put("drop", state);
+      return { state, leaseHash, consumed: false };
     });
   }
 
