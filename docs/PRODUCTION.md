@@ -50,7 +50,8 @@ npx --yes wrangler@4.125.0 r2 bucket list
 npx --yes wrangler@4.125.0 r2 bucket lifecycle list keydrop-drops
 bash tests/smoke.sh
 install -d -m 0700 /home/node/.local/state/keydrop/wrangler-dry-run
-WRANGLER_SEND_METRICS=false npx --yes wrangler@4.125.0 deploy \
+CLOUDFLARE_INCLUDE_PROCESS_ENV=false WRANGLER_SEND_METRICS=false \
+  npx --yes wrangler@4.125.0 deploy \
   --config worker/wrangler.jsonc \
   --dry-run \
   --outdir /home/node/.local/state/keydrop/wrangler-dry-run
@@ -85,7 +86,8 @@ After stopping Wrangler, remove the local-only credential with `unlink worker/.d
 Deployment is an external production change. Run it only after reviewing the gate:
 
 ```bash
-WRANGLER_SEND_METRICS=false npx --yes wrangler@4.125.0 deploy \
+CLOUDFLARE_INCLUDE_PROCESS_ENV=false WRANGLER_SEND_METRICS=false \
+  npx --yes wrangler@4.125.0 deploy \
   --config worker/wrangler.jsonc \
   --strict \
   --secrets-file /home/node/.config/keydrop/worker-secrets.env
@@ -149,7 +151,12 @@ keydrop_cleanup() {
     test ! -e "$keydrop_artifact" || unlink "$keydrop_artifact"
   done
 }
-trap keydrop_cleanup EXIT HUP INT TERM
+keydrop_abort() {
+  keydrop_cleanup
+  exit 1
+}
+trap keydrop_cleanup EXIT
+trap keydrop_abort HUP INT TERM
 
 /absolute/path/to/generator > "$keydrop_plaintext"
 test -s "$keydrop_plaintext"
