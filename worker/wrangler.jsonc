@@ -1,0 +1,23 @@
+{
+  "name": "keydrop",
+  "main": "./index.mjs",
+  "compatibility_date": "2026-08-24",
+  "workers_dev": true,
+  "observability": { "enabled": false },
+  "assets": {
+    "directory": "..",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "r2_buckets": [
+    { "binding": "DROPS", "bucket_name": "keydrop-drops" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "DROP_SESSIONS", "class_name": "DropSession" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["DropSession"] }
+  ]
+}

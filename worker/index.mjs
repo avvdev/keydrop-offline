@@ -16,6 +16,9 @@ export default {
       }
       const action = apiAction(request.method, url.pathname);
       if (action) return dispatchDrop(request, env, action);
+      if (request.method === "GET" && url.pathname === "/service-worker.js") {
+        return retiredServiceWorker();
+      }
       if (!env.ASSETS) return fail(404, "not_found");
       return secureAsset(await env.ASSETS.fetch(request), url.pathname);
     } catch {
@@ -204,6 +207,14 @@ function secureAsset(response, path) {
   headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   if (path === "/" || path.endsWith(".html")) headers.set("Cache-Control", "no-store");
   return secured;
+}
+
+function retiredServiceWorker() {
+  const source = `self.addEventListener("install",()=>self.skipWaiting());self.addEventListener("activate",event=>event.waitUntil(Promise.all([caches.keys().then(keys=>Promise.all(keys.map(key=>caches.delete(key)))),self.registration.unregister(),self.clients.claim()])));`;
+  return new Response(source, { headers: noStoreHeaders({
+    "Content-Type": "text/javascript; charset=utf-8",
+    "Service-Worker-Allowed": "/",
+  }) });
 }
 
 function noStore(response) {

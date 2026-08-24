@@ -24,9 +24,9 @@
 <body>
   <main>
     <h1>Keydrop Offline</h1>
-    <small>Расшифровка выполняется локально. Страница загружает только собственные файлы.</small>
+    <small id="intro">Расшифровка выполняется локально. Страница загружает только собственные файлы.</small>
     <p><a id="download-and-select" href="smoke-not-a-secret.toml.enc" download="smoke-not-a-secret.toml.enc">1. Скачать и сразу выбрать фиктивный .enc</a></p>
-    <small>После нажатия файл уже будет выбран ниже. Проводник Android открывать не нужно.</small>
+    <small id="download-help">После нажатия файл уже будет выбран ниже. Проводник Android открывать не нужно.</small>
     <form id="decrypt-form">
       <label for="encrypted-file">Зашифрованный файл</label>
       <input id="encrypted-file" type="file" accept=".enc,application/octet-stream" required>

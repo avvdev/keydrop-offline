@@ -103,7 +103,14 @@ async function main() {
         return new Blob([encrypted]);
       },
     }),
+    history: { replaceState() {} },
+    location: { hash: "", pathname: "/", search: "" },
     navigator: {},
+    sessionStorage: {
+      getItem() { return null; },
+      setItem() {},
+      removeItem() {},
+    },
     setImmediate,
     setTimeout(callback) {
       queueMicrotask(callback);
@@ -281,4 +288,103 @@ assert.equal(page.headers.get("referrer-policy"), "no-referrer");
 assert.equal(page.headers.get("cache-control"), "no-store");
 assert.ok(!(/console\.(log|error|warn)/).test(await (await import("node:fs/promises")).readFile("worker/index.mjs", "utf8")));
 console.log("PASS Worker auth, fragment capability, atomic lease, no-store payload, acknowledgement cleanup");
+NODE
+
+node --input-type=module <<'NODE'
+import assert from "node:assert/strict";
+import { createHash, randomBytes } from "node:crypto";
+import fs from "node:fs";
+import vm from "node:vm";
+
+function element() {
+  return {
+    dataset: {}, files: [], handlers: {}, hidden: false, textContent: "",
+    addEventListener(name, handler) { this.handlers[name] = handler; },
+    dispatchEvent(event) { this.handlers[event.type]?.(event); },
+  };
+}
+
+class TestFile extends Blob {
+  constructor(parts, name, options) { super(parts, options); this.name = name; }
+}
+
+class TestTransfer {
+  constructor() {
+    this.files = [];
+    this.items = { add: (file) => this.files.push(file) };
+  }
+}
+
+const token = randomBytes(32).toString("base64url");
+const encrypted = new TextEncoder().encode("one network payload");
+const checksum = createHash("sha256").update(encrypted).digest("hex");
+const selectors = [
+  "#download-and-select", "#encrypted-file", "#file-info", "#status", "#intro",
+  "#download-help", "#fill-test-password", "h1",
+];
+const elements = Object.fromEntries(selectors.map((selector) => [selector, element()]));
+const calls = [];
+const stored = new Map();
+const observers = [];
+let replacedWith = null;
+
+const context = {
+  Blob,
+  DataTransfer: TestTransfer,
+  Event: class TestEvent { constructor(type) { this.type = type; } },
+  File: TestFile,
+  Headers,
+  MutationObserver: class TestObserver {
+    constructor(callback) { this.callback = callback; observers.push(this); }
+    observe() {}
+    disconnect() { this.disconnected = true; }
+  },
+  Response,
+  TextEncoder,
+  Uint8Array,
+  btoa,
+  crypto: globalThis.crypto,
+  document: { querySelector(selector) { return elements[selector]; } },
+  fetch: async (path, options) => {
+    calls.push({ path, options });
+    if (path.endsWith("/claim")) return new Response(null, { status: 204 });
+    if (path.endsWith("/ack")) return new Response(null, { status: 204 });
+    return new Response(encrypted, { headers: {
+      "Content-Length": String(encrypted.length),
+      "X-Keydrop-SHA256": checksum,
+    } });
+  },
+  history: { replaceState(_state, _title, path) { replacedWith = path; } },
+  location: { hash: `#${token}`, pathname: "/", search: "" },
+  sessionStorage: {
+    getItem(key) { return stored.get(key) ?? null; },
+    setItem(key, value) { stored.set(key, value); },
+    removeItem(key) { stored.delete(key); },
+  },
+};
+context.globalThis = context;
+context.window = context;
+vm.createContext(context);
+vm.runInContext(fs.readFileSync("autoselect.js", "utf8"), context, { filename: "autoselect.js" });
+await vm.runInContext("productionReady", context);
+
+assert.equal(replacedWith, "/");
+assert.equal(calls.length, 2);
+assert.deepEqual(calls.map((call) => call.path), ["/api/v1/drop/claim", "/api/v1/drop"]);
+assert.ok(calls.every((call) => !call.path.includes(token)));
+assert.ok(calls.every((call) => call.options.cache === "no-store"));
+assert.ok(calls.every((call) => call.options.credentials === "omit"));
+assert.ok(calls.every((call) => call.options.redirect === "error"));
+assert.equal(elements["#encrypted-file"].files[0].name, "delivery.enc");
+assert.equal(await elements["#encrypted-file"].files[0].text(), "one network payload");
+assert.equal(elements["#fill-test-password"].hidden, true);
+assert.equal(elements["#status"].textContent, "Файл получен и выбран. Введи пароль доставки.");
+
+elements["#status"].textContent = "Готово. Файл расшифрован на этом устройстве.";
+observers[0].callback();
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(calls.length, 3);
+assert.equal(calls[2].path, "/api/v1/drop/ack");
+assert.equal(stored.size, 0);
+console.log("PASS fragment erased, one payload fetch, in-memory selection, post-decrypt acknowledgement");
 NODE
