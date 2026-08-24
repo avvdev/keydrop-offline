@@ -7,6 +7,11 @@ test "$actual_fixture_sha" = "$expected_fixture_sha"
 grep -F 'keydrop-offline-spike-v5' service-worker.js >/dev/null
 grep -F 'id="download-and-select"' index.html >/dev/null
 grep -F 'src="autoselect.js"' index.html >/dev/null
+test "$(grep '^!' .assetsignore | cut -c2- | sort)" = "$(printf '%s\n' autoselect.js decrypt.bundle.js icon.svg index.html manifest.webmanifest smoke-not-a-secret.toml.enc | sort)"
+grep -Fx '*' .assetsignore >/dev/null
+for private_path in keydrop cli tests worker .git service-worker.js; do
+  ! grep -Fx "!${private_path}" .assetsignore >/dev/null
+done
 
 node <<'NODE'
 const assert = require("node:assert/strict");
