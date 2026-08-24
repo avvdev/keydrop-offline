@@ -16,12 +16,18 @@ for private_path in keydrop cli tests worker .git service-worker.js; do
   ! grep -Fx "!${private_path}" .assetsignore >/dev/null
 done
 grep -F '"directory": "./public"' worker/wrangler.jsonc >/dev/null
-test "$(find worker/public -maxdepth 1 -type f -printf '%f\n' | sort)" = "$(printf '%s\n' autoselect.js decrypt.bundle.js icon.svg index.html manifest.webmanifest | sort)"
+test "$(find worker/public -mindepth 1 -printf '%P\n' | sort)" = "$(printf '%s\n' autoselect.js decrypt.bundle.js icon.svg index.html manifest.webmanifest | sort)"
 for public_asset in autoselect.js decrypt.bundle.js icon.svg index.html manifest.webmanifest; do
+  test -f "worker/public/${public_asset}"
+  test ! -L "worker/public/${public_asset}"
   cmp "worker/public/${public_asset}" "${public_asset}"
 done
 test ! -e worker/public/smoke-not-a-secret.toml.enc
-grep -Fx '.dev.vars' worker/.gitignore >/dev/null
+grep -Fx '.dev.vars*' .gitignore >/dev/null
+grep -Fx '.env*' .gitignore >/dev/null
+grep -Fx 'node_modules/' .gitignore >/dev/null
+grep -Fx '.dev.vars*' worker/.gitignore >/dev/null
+grep -Fx '.env*' worker/.gitignore >/dev/null
 grep -Fx '.wrangler/' worker/.gitignore >/dev/null
 
 node <<'NODE'

@@ -10,12 +10,15 @@ Use Node.js 22 or newer and pinned Wrangler `4.125.0`. Do not put the Cloudflare
 
 ## 1. One-time Cloudflare bootstrap
 
-Login is interactive and changes Cloudflare account state:
+Login is interactive and changes Cloudflare account state. On the remote VPS use the device flow, then inspect the authenticated account before creating anything:
 
 ```bash
-npx --yes wrangler@4.125.0 login
+npx --yes wrangler@4.125.0 login --device
+npx --yes wrangler@4.125.0 whoami --json
 npx --yes wrangler@4.125.0 r2 bucket create keydrop-drops
 ```
+
+Stop if `whoami --json` does not contain the expected account ID and name. A scoped noninteractive Cloudflare API token is also acceptable when supplied by the VPS secret manager; never place it in this repository or a committed dotenv file.
 
 Create one local upload token without printing it. Keep a raw copy for the CLI and a protected dotenv copy for an atomic first deploy:
 
@@ -30,7 +33,7 @@ awk '{ print "UPLOAD_TOKEN=" $0 }' \
 chmod 0600 /home/node/.config/keydrop/worker-secrets.env
 ```
 
-Add a lifecycle backstop for an object orphaned between R2 write and Durable Object initialization. Normal deletion still happens at ACK or TTL; this rule removes any remaining `drops/` object after one day:
+Add a lifecycle backstop for an object orphaned between R2 write and Durable Object initialization. Normal deletion still happens at ACK or TTL. The one-day rule schedules remaining `drops/` objects for expiry; Cloudflare may take additional time to physically delete expired objects, so this is not a strict 24-hour retention cap:
 
 ```bash
 npx --yes wrangler@4.125.0 r2 bucket lifecycle add \
@@ -42,6 +45,9 @@ npx --yes wrangler@4.125.0 r2 bucket lifecycle list keydrop-drops
 ## 2. Pre-deploy gate
 
 ```bash
+npx --yes wrangler@4.125.0 whoami --json
+npx --yes wrangler@4.125.0 r2 bucket list
+npx --yes wrangler@4.125.0 r2 bucket lifecycle list keydrop-drops
 bash tests/smoke.sh
 install -d -m 0700 /home/node/.local/state/keydrop/wrangler-dry-run
 WRANGLER_SEND_METRICS=false npx --yes wrangler@4.125.0 deploy \
@@ -60,7 +66,7 @@ index.html
 manifest.webmanifest
 ```
 
-`smoke-not-a-secret.toml.enc` is an explicitly harmless fixture served by a fixed Worker route and checked against its pinned SHA-256 by the smoke test; it is not copied into the static directory. The root `.assetsignore` remains a secondary deny-by-default guard for GitHub Pages tooling, but production Worker publication does not depend on it.
+`smoke-not-a-secret.toml.enc` is an explicitly harmless fixture served by a fixed Worker route and checked against its pinned SHA-256 by the smoke test; it is not copied into the static directory. The recursive smoke assertion rejects nested paths and symlinks. The root `.assetsignore` is retained only as defense for an accidental legacy Wrangler invocation against the repository root; production publication does not depend on it.
 
 For local Miniflare development, use an isolated `worker/.dev.vars`; it is ignored by Git. Never enable process-environment injection, because unrelated VPS secrets could become Worker bindings:
 
@@ -81,6 +87,7 @@ Deployment is an external production change. Run it only after reviewing the gat
 ```bash
 WRANGLER_SEND_METRICS=false npx --yes wrangler@4.125.0 deploy \
   --config worker/wrangler.jsonc \
+  --strict \
   --secrets-file /home/node/.config/keydrop/worker-secrets.env
 ```
 
@@ -122,22 +129,41 @@ Do not paste URL and password into the same Telegram message if protection again
 
 ## 5. Automated send
 
-The automation uses the same CLI. Prefer stdin so generated plaintext never needs a temporary file:
+The automation uses the same CLI. Gate the generator before upload: a failing producer must not upload empty or partial output. A unique mode-`0700` job directory also gives every O_EXCL password path and bearer URL a fresh name:
 
 ```bash
-umask 077
-/absolute/path/to/generator \
-  | ./keydrop send - \
-      --endpoint https://keydrop.YOUR-SUBDOMAIN.workers.dev/ \
-      --token-file /home/node/.config/keydrop/upload-token \
-      --password-out /home/node/.local/state/keydrop/passwords/job-001.pass \
-      --ttl 1800 \
-  > /home/node/.local/state/keydrop/job-001.url
+set -euo pipefail
+install -d -m 0700 /home/node/.local/state/keydrop/jobs
+keydrop_job_dir="$(mktemp -d /home/node/.local/state/keydrop/jobs/job-XXXXXXXX)"
+keydrop_plaintext="${keydrop_job_dir}/payload"
+keydrop_password="${keydrop_job_dir}/delivery.pass"
+keydrop_url_tmp="${keydrop_job_dir}/delivery.url.tmp"
+keydrop_url="${keydrop_job_dir}/delivery.url"
+keydrop_cleanup() {
+  for keydrop_artifact in "$keydrop_plaintext" "$keydrop_password" "$keydrop_url_tmp" "$keydrop_url"; do
+    test ! -e "$keydrop_artifact" || unlink "$keydrop_artifact"
+  done
+}
+trap keydrop_cleanup EXIT HUP INT TERM
+
+/absolute/path/to/generator > "$keydrop_plaintext"
+test -s "$keydrop_plaintext"
+./keydrop send "$keydrop_plaintext" \
+  --endpoint https://keydrop.YOUR-SUBDOMAIN.workers.dev/ \
+  --token-file /home/node/.config/keydrop/upload-token \
+  --password-out "$keydrop_password" \
+  --ttl 1800 > "$keydrop_url_tmp"
+test "$(wc -l < "$keydrop_url_tmp")" -eq 1
+grep -Eq '^https://[^[:space:]#?]+/#[A-Za-z0-9_-]{43}$' "$keydrop_url_tmp"
+mv "$keydrop_url_tmp" "$keydrop_url"
+unlink "$keydrop_plaintext"
+trap - EXIT HUP INT TERM
+printf '%s\n' "$keydrop_job_dir"
 ```
 
-The notification layer reads only `job-001.url` and sends that URL. It must not attach the password file or log the upload token. For Katya/OpenClaw, the normal reply in the active Telegram conversation carries the URL; the password stays on the VPS for console retrieval or a separate channel. No `sessions_send`, cron, systemd, or Telegram configuration change is required by Keydrop itself.
+The notification layer reads only `delivery.url` and sends that URL. After confirmed Telegram delivery it unlinks the URL artifact; it must never attach `delivery.pass` or log the upload token. The password stays on the VPS for console retrieval or a separate channel and is unlinked after recipient confirmation. For Katya/OpenClaw, the normal reply in the active Telegram conversation carries the URL; no `sessions_send`, cron, systemd, or Telegram configuration change is required by Keydrop itself.
 
-If a generator writes plaintext to disk, cleanup remains the generator/operator's responsibility. Keydrop never deletes caller-owned input. Prefer a private directory and a normal unlink after use; do not claim secure erasure on SSD or copy-on-write storage.
+This reliable gate briefly writes plaintext into the private job directory. Cleanup remains the generator/operator's responsibility, and normal unlink is not secure erasure on SSD or copy-on-write storage. A stdin-only pipeline avoids that file but cannot prevent an already-started upload of partial output when its upstream producer fails.
 
 ## 6. Recipient flow
 
@@ -147,11 +173,11 @@ If a generator writes plaintext to disk, cleanup remains the generator/operator'
 4. Enter the separately received password and decrypt.
 5. Keep the page open until it says `Готово. Серверная копия удалена.`
 
-If acknowledgement loses its response, the browser records an `ack` phase in `sessionStorage` and retries on the next open. A `410` during that retry is treated as already consumed. If Android fails to persist the decrypted download, retry decryption in the same still-open page before closing it.
+If acknowledgement loses its response, the browser records an `ack` phase in `sessionStorage` and retries on the next open. The same winning lease receives `204` after confirmed R2 deletion, including an idempotent retry. A `410` closes the local capability but is not presented as proof of immediate physical deletion; TTL, alarm, and lifecycle cleanup remain the backstop. If Android fails to persist the decrypted download, retry decryption in the same still-open page before closing it.
 
 ## 7. Rotation, rollback, and cleanup
 
-Rotate the upload credential without printing it. Apply the remote secret first, then atomically replace both protected local copies so a later `--secrets-file` deploy cannot restore the old value:
+Rotate the upload credential without printing it. Apply the remote secret first, then replace each protected local copy with an atomic rename so a later `--secrets-file` deploy cannot restore the old value. The pair of renames is not one atomic transaction: if interrupted, keep and resume from the matching `.next` files before another deploy.
 
 ```bash
 umask 077
@@ -175,6 +201,8 @@ npx --yes wrangler@4.125.0 rollback VERSION_ID \
   --message "rollback keydrop" --yes
 ```
 
+Do not roll back to a version from before the `v1` Durable Object migration; code rollback cannot undo a Durable Object class migration. Rollback also does not revert R2 objects, Durable Object data, bucket lifecycle rules, secrets, or other resources. Repeat the full fake data-plane canary after rollback, not only `/healthz`.
+
 After the recipient confirms success, remove the local password file:
 
 ```bash
@@ -186,7 +214,7 @@ On CLI failure or `SIGINT`/`SIGTERM`/`SIGHUP`, Keydrop truncates and syncs the c
 ## 8. Operational checks
 
 - `/healthz` proves Worker routing, not R2/DO health.
-- A canary must use fake plaintext and complete upload, claim, payload, decrypt, and ACK.
+- A mandatory post-deploy and post-rollback canary must use fake plaintext and complete upload, claim, payload, decrypt, ACK, and replay rejection.
 - No drop-listing endpoint exists by design.
 - Keep application observability free of URLs, fragments, authorization headers, password paths, filenames, payloads, and hashes tied to a recipient.
 - Alert on upload `5xx`, missing/stale canary success, R2 lifecycle drift, or repeated cleanup failures; do not log secrets to make diagnosis easier.
