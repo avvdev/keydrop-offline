@@ -1,21 +1,24 @@
 import sodium from "libsodium-wrappers-sumo";
 import { createHash, randomBytes } from "node:crypto";
-import { open, unlink } from "node:fs/promises";
-import { constants, unlinkSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { closeSync, constants, fstatSync, fsyncSync, ftruncateSync, lstatSync, openSync, unlinkSync, writeFileSync } from "node:fs";
 
 const SIGNATURE = new TextEncoder().encode("zDKO6XYXioc");
 const SALT_BYTES = 16, HEADER_BYTES = 24, AUTH_BYTES = 17;
 const MAX_CIPHERTEXT = 16 * 1024 * 1024, MAX_PLAINTEXT = MAX_CIPHERTEXT - SIGNATURE.length - SALT_BYTES - HEADER_BYTES - AUTH_BYTES;
 const TOKEN_RE = /^[A-Za-z0-9._~-]{32,512}$/, DELIVERY_RE = /^[A-Za-z0-9_-]{43}$/, ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-let incompletePasswordPath;
+let incompletePassword;
 
 process.umask(0o077);
 process.once("SIGINT", () => stop(130));
 process.once("SIGTERM", () => stop(143));
+process.once("SIGHUP", () => stop(129));
 
 function stop(code) {
-  if (incompletePasswordPath) {
-    try { unlinkSync(incompletePasswordPath); } catch {}
+  try {
+    scrubPassword();
+  } catch {
+    process.stderr.write("keydrop: password cleanup failed\n");
   }
   process.exit(code);
 }
@@ -60,7 +63,8 @@ async function uploadToken(path) {
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error("token file must be a private regular file");
-    const token = (await handle.readFile("utf8")).trim();
+    if (stat.size > 514) throw new Error("invalid upload token file");
+    const token = (await readBounded(handle, 514, "invalid upload token file")).toString("utf8").trim();
     if (!TOKEN_RE.test(token)) throw new Error("invalid upload token file");
     return token;
   } finally {
@@ -74,9 +78,7 @@ async function plaintext(input) {
     try {
       const stat = await handle.stat();
       if (!stat.isFile() || stat.size > MAX_PLAINTEXT) throw new Error("input must be a regular file smaller than 16 MiB");
-      const bytes = new Uint8Array(await handle.readFile());
-      if (bytes.length > MAX_PLAINTEXT) throw new Error("input is too large");
-      return bytes;
+      return new Uint8Array(await readBounded(handle, MAX_PLAINTEXT, "input is too large"));
     } finally {
       await handle.close();
     }
@@ -89,6 +91,18 @@ async function plaintext(input) {
     chunks.push(chunk);
   }
   return new Uint8Array(Buffer.concat(chunks, size));
+}
+
+async function readBounded(handle, limit, message) {
+  const buffer = Buffer.allocUnsafe(limit + 1);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+    if (!bytesRead) break;
+    offset += bytesRead;
+  }
+  if (offset > limit) throw new Error(message);
+  return buffer.subarray(0, offset);
 }
 
 function password() {
@@ -144,24 +158,41 @@ function concat(parts) {
   return result;
 }
 
-async function savePassword(path, passphrase) {
-  const handle = await open(path, "wx", 0o600);
-  incompletePasswordPath = path;
+function savePassword(path, passphrase) {
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  const stat = fstatSync(fd);
+  incompletePassword = { path, fd, dev: stat.dev, ino: stat.ino };
   try {
-    await handle.writeFile(`${passphrase}\n`, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
+    writeFileSync(fd, `${passphrase}\n`, "utf8");
+    fsyncSync(fd);
+  } catch {
+    scrubPassword();
+    throw new Error("password write failed");
   }
+}
+
+function scrubPassword() {
+  const record = incompletePassword;
+  if (!record) return;
+  incompletePassword = undefined;
+  let failure;
+  try { ftruncateSync(record.fd, 0); fsyncSync(record.fd); } catch (error) { failure = error; }
+  try { closeSync(record.fd); } catch (error) { failure ||= error; }
+  try {
+    const current = lstatSync(record.path);
+    if (current.dev === record.dev && current.ino === record.ino) unlinkSync(record.path);
+  } catch (error) {
+    if (error.code !== "ENOENT") failure ||= error;
+  }
+  if (failure) throw new Error("password cleanup failed");
 }
 
 async function upload(origin, token, ttl, ciphertext) {
   const checksum = createHash("sha256").update(ciphertext).digest("hex");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
-  let response;
   try {
-    response = await fetch(new URL("/api/v1/drops", origin), {
+    const response = await fetch(new URL("/api/v1/drops", origin), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -175,22 +206,22 @@ async function upload(origin, token, ttl, ciphertext) {
       referrerPolicy: "no-referrer",
       signal: controller.signal,
     });
-  } catch {
+    if (response.status !== 201) throw new Error("upload rejected");
+    const raw = await limitedBody(response, 8192);
+    let receipt;
+    try { receipt = JSON.parse(raw); } catch { throw new Error("invalid upload receipt"); }
+    let delivery;
+    try { delivery = new URL(receipt.url); } catch { throw new Error("invalid delivery URL"); }
+    if (delivery.origin !== origin.origin || delivery.username || delivery.password || delivery.pathname !== "/" ||
+        delivery.search || !DELIVERY_RE.test(delivery.hash.slice(1))) throw new Error("invalid delivery URL");
+    return delivery.href;
+  } catch (error) {
+    const safe = ["upload rejected", "upload receipt is too large", "invalid upload receipt", "invalid delivery URL"];
+    if (safe.includes(error.message)) throw error;
     throw new Error("upload failed");
   } finally {
     clearTimeout(timeout);
   }
-  if (response.status !== 201) throw new Error("upload rejected");
-  const raw = await limitedBody(response, 8192);
-  let receipt;
-  try { receipt = JSON.parse(raw); } catch { throw new Error("invalid upload receipt"); }
-  let delivery;
-  try { delivery = new URL(receipt.url); } catch { throw new Error("invalid delivery URL"); }
-  if (delivery.origin !== origin.origin || delivery.pathname !== "/" || delivery.search ||
-      !DELIVERY_RE.test(delivery.hash.slice(1))) {
-    throw new Error("invalid delivery URL");
-  }
-  return delivery.href;
 }
 
 async function limitedBody(response, limit) {
@@ -202,7 +233,10 @@ async function limitedBody(response, limit) {
     const { done, value } = await reader.read();
     if (done) break;
     size += value.length;
-    if (size > limit) throw new Error("upload receipt is too large");
+    if (size > limit) {
+      await reader.cancel();
+      throw new Error("upload receipt is too large");
+    }
     chunks.push(value);
   }
   return new TextDecoder().decode(concat(chunks));
@@ -221,16 +255,14 @@ async function main() {
     cleartext = await plaintext(options.input);
     passphrase = password();
     ciphertext = await encrypt(cleartext, passphrase);
-    await savePassword(options.passwordOut, passphrase);
+    savePassword(options.passwordOut, passphrase);
     const delivery = await upload(origin, token, options.ttl, ciphertext);
+    closeSync(incompletePassword.fd);
+    incompletePassword = undefined;
     succeeded = true;
-    incompletePasswordPath = undefined;
     process.stdout.write(`${delivery}\n`);
   } finally {
-    if (!succeeded && incompletePasswordPath) {
-      try { await unlink(incompletePasswordPath); } catch {}
-      incompletePasswordPath = undefined;
-    }
+    if (!succeeded) scrubPassword();
     cleartext?.fill(0);
     ciphertext?.fill(0);
     token = undefined;

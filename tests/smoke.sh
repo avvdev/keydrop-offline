@@ -167,9 +167,11 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import vm from "node:vm";
 
-function run(args) {
+function run(args, onSpawn) {
   return new Promise((resolve, reject) => {
     const child = spawn("./keydrop", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("CLI timeout")); }, 20_000);
+    onSpawn?.(child);
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -177,7 +179,7 @@ function run(args) {
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.once("error", reject);
-    child.once("close", (code) => resolve({ code, stdout, stderr }));
+    child.once("close", (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
   });
 }
 
@@ -238,23 +240,30 @@ fs.writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 });
 fs.writeFileSync(inputFile, secret, { mode: 0o600 });
 
 let captured;
-let rejectUpload = false;
+let behavior = "ok";
+let uploadArrived;
+let releaseUpload;
+let origin;
 const deliveryToken = "A".repeat(43);
 const server = http.createServer(async (request, response) => {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
   const body = Buffer.concat(chunks);
   captured = { url: request.url, headers: request.headers, body };
-  if (rejectUpload) {
+  if (behavior.startsWith("pause")) {
+    uploadArrived();
+    await new Promise((resolve) => { releaseUpload = resolve; });
+  }
+  if (behavior.endsWith("reject")) {
     response.writeHead(503).end("unavailable");
     return;
   }
-  const origin = `http://127.0.0.1:${server.address().port}`;
   response.writeHead(201, { "Content-Type": "application/json" });
-  response.end(JSON.stringify({ url: `${origin}/#${deliveryToken}` }));
+  const delivery = behavior === "credentials" ? origin.replace("//", "//user:pass@") + `#${deliveryToken}` : `${origin}#${deliveryToken}`;
+  response.end(JSON.stringify({ url: delivery }));
 });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-const origin = `http://127.0.0.1:${server.address().port}/`;
+origin = `http://127.0.0.1:${server.address().port}/`;
 
 try {
   const result = await run([
@@ -282,17 +291,61 @@ try {
   assert.equal(result.stderr.includes(token), false);
   assert.deepEqual(await decryptWithBrowserBundle(captured.body, password), new Uint8Array(secret));
 
-  rejectUpload = true;
+  behavior = "pause-reject";
   const failedPassword = path.join(temporary, "failed.pass");
-  const failed = await run([
+  const movedPassword = path.join(temporary, "moved.pass");
+  const arrived = new Promise((resolve) => { uploadArrived = resolve; });
+  const pendingFailure = run([
     "send", inputFile, "--endpoint", origin, "--token-file", tokenFile,
     "--password-out", failedPassword, "--ttl", "300",
   ]);
+  await arrived;
+  fs.renameSync(failedPassword, movedPassword);
+  fs.writeFileSync(failedPassword, "replacement", { mode: 0o600 });
+  releaseUpload();
+  const failed = await pendingFailure;
   assert.equal(failed.code, 1);
   assert.equal(failed.stdout, "");
   assert.match(failed.stderr, /^keydrop: upload rejected\n$/);
-  assert.equal(fs.existsSync(failedPassword), false);
+  assert.equal(fs.readFileSync(failedPassword, "utf8"), "replacement");
+  assert.equal(fs.statSync(movedPassword).size, 0);
   assert.equal(failed.stderr.includes(token), false);
+
+  behavior = "credentials";
+  const credentialPassword = path.join(temporary, "credentials.pass");
+  const credentialed = await run([
+    "send", inputFile, "--endpoint", origin, "--token-file", tokenFile,
+    "--password-out", credentialPassword, "--ttl", "300",
+  ]);
+  assert.equal(credentialed.code, 1);
+  assert.match(credentialed.stderr, /^keydrop: invalid delivery URL\n$/);
+  assert.equal(fs.existsSync(credentialPassword), false);
+
+  const oversizedToken = path.join(temporary, "oversized-token");
+  const oversizedPassword = path.join(temporary, "oversized.pass");
+  fs.writeFileSync(oversizedToken, "x".repeat(600), { mode: 0o600 });
+  const oversized = await run([
+    "send", inputFile, "--endpoint", origin, "--token-file", oversizedToken,
+    "--password-out", oversizedPassword, "--ttl", "300",
+  ]);
+  assert.equal(oversized.code, 1);
+  assert.match(oversized.stderr, /^keydrop: invalid upload token file\n$/);
+  assert.equal(fs.existsSync(oversizedPassword), false);
+
+  behavior = "pause-ok";
+  const signalPassword = path.join(temporary, "signal.pass");
+  const signalArrived = new Promise((resolve) => { uploadArrived = resolve; });
+  let signalChild;
+  const signalledRun = run([
+    "send", inputFile, "--endpoint", origin, "--token-file", tokenFile,
+    "--password-out", signalPassword, "--ttl", "300",
+  ], (child) => { signalChild = child; });
+  await signalArrived;
+  signalChild.kill("SIGHUP");
+  const signalled = await signalledRun;
+  releaseUpload();
+  assert.equal(signalled.code, 129);
+  assert.equal(fs.existsSync(signalPassword), false);
   console.log("PASS standalone CLI secrecy, mode 0600 password, failure cleanup, browser-compatible roundtrip");
 } finally {
   server.close();
