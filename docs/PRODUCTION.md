@@ -97,7 +97,12 @@ Save the HTTPS origin printed by Wrangler, including no path, query, or fragment
 curl -fsS https://keydrop.YOUR-SUBDOMAIN.workers.dev/healthz
 curl -fsSI https://keydrop.YOUR-SUBDOMAIN.workers.dev/ \
   | grep -Ei 'content-security-policy|cache-control|referrer-policy|x-frame-options'
+node scripts/live-canary.mjs \
+  --endpoint https://keydrop.YOUR-SUBDOMAIN.workers.dev/ \
+  --token-file /home/node/.config/keydrop/upload-token
 ```
+
+The deployment is not accepted until the last command prints exactly `PASS keydrop live data-plane canary`. It creates only random fake plaintext, verifies upload → claim → checksum → shipped-browser-bundle decryption → ACK → idempotent ACK → replay `410`, prints no capability or password, and removes its local password artifact. On failure, any remote fake ciphertext is still bounded by the five-minute TTL and lifecycle backstop.
 
 `workers_dev` is intentionally enabled for the first deployment. If a custom domain is later configured, set `workers_dev` to `false` and verify the `workers.dev` origin is no longer a bypass.
 
@@ -201,7 +206,7 @@ npx --yes wrangler@4.125.0 rollback VERSION_ID \
   --message "rollback keydrop" --yes
 ```
 
-Do not roll back to a version from before the `v1` Durable Object migration; code rollback cannot undo a Durable Object class migration. Rollback also does not revert R2 objects, Durable Object data, bucket lifecycle rules, secrets, or other resources. Repeat the full fake data-plane canary after rollback, not only `/healthz`.
+Do not roll back to a version from before the `v1` Durable Object migration; code rollback cannot undo a Durable Object class migration. Rollback also does not revert R2 objects, Durable Object data, bucket lifecycle rules, secrets, or other resources. Repeat the exact `scripts/live-canary.mjs` command from section 3 after rollback, not only `/healthz`.
 
 After the recipient confirms success, remove the local password file:
 
@@ -214,7 +219,7 @@ On CLI failure or `SIGINT`/`SIGTERM`/`SIGHUP`, Keydrop truncates and syncs the c
 ## 8. Operational checks
 
 - `/healthz` proves Worker routing, not R2/DO health.
-- A mandatory post-deploy and post-rollback canary must use fake plaintext and complete upload, claim, payload, decrypt, ACK, and replay rejection.
+- The mandatory `scripts/live-canary.mjs` post-deploy and post-rollback gate uses fake plaintext and completes upload, claim, payload, shipped-bundle decrypt, idempotent ACK, and replay rejection.
 - No drop-listing endpoint exists by design.
 - Keep application observability free of URLs, fragments, authorization headers, password paths, filenames, payloads, and hashes tied to a recipient.
 - Alert on upload `5xx`, missing/stale canary success, R2 lifecycle drift, or repeated cleanup failures; do not log secrets to make diagnosis easier.

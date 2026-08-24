@@ -29,6 +29,9 @@ grep -Fx 'node_modules/' .gitignore >/dev/null
 grep -Fx '.dev.vars*' worker/.gitignore >/dev/null
 grep -Fx '.env*' worker/.gitignore >/dev/null
 grep -Fx '.wrangler/' worker/.gitignore >/dev/null
+test -x scripts/live-canary.mjs
+node --check scripts/live-canary.mjs
+test "$(node scripts/live-canary.mjs --help)" = "usage: node scripts/live-canary.mjs --endpoint URL --token-file FILE"
 
 node <<'NODE'
 const assert = require("node:assert/strict");
