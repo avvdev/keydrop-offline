@@ -1,10 +1,11 @@
 "use strict";
 
-const CACHE = "keydrop-offline-spike-v4";
+const CACHE = "keydrop-offline-spike-v5";
 const ASSETS = [
   "./",
   "./index.html",
   "./decrypt.bundle.js",
+  "./autoselect.js",
   "./manifest.webmanifest",
   "./icon.svg",
   "./smoke-not-a-secret.toml.enc",

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'none'; img-src 'self' data:; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="theme-color" content="#111827">
   <link rel="manifest" href="manifest.webmanifest">
   <title>Keydrop Offline</title>
@@ -24,9 +24,9 @@
 <body>
   <main>
     <h1>Keydrop Offline</h1>
-    <small>Расшифровка выполняется локально. Сеть запрещена политикой страницы.</small>
-    <p><a href="smoke-not-a-secret.toml.enc" download>1. Скачать фиктивный .enc</a></p>
-    <small>Затем установи страницу на главный экран, включи авиарежим и выполни шаг 2.</small>
+    <small>Расшифровка выполняется локально. Страница загружает только собственные файлы.</small>
+    <p><a id="download-and-select" href="smoke-not-a-secret.toml.enc" download="smoke-not-a-secret.toml.enc">1. Скачать и сразу выбрать фиктивный .enc</a></p>
+    <small>После нажатия файл уже будет выбран ниже. Проводник Android открывать не нужно.</small>
     <form id="decrypt-form">
       <label for="encrypted-file">Зашифрованный файл</label>
       <input id="encrypted-file" type="file" accept=".enc,application/octet-stream" required>
@@ -40,5 +40,6 @@
     <p id="status" role="status"></p>
   </main>
   <script src="decrypt.bundle.js"></script>
+  <script src="autoselect.js"></script>
 </body>
 </html>
