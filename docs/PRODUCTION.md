@@ -210,10 +210,28 @@ List deployments and roll back to a reviewed version:
 npx --yes wrangler@4.125.0 deployments list --config worker/wrangler.jsonc
 npx --yes wrangler@4.125.0 rollback VERSION_ID \
   --config worker/wrangler.jsonc \
-  --message "rollback keydrop" --yes
+  --message "rollback keydrop"
 ```
 
-Do not roll back to a version from before the `v1` Durable Object migration; code rollback cannot undo a Durable Object class migration. Rollback also does not revert R2 objects, Durable Object data, bucket lifecycle rules, secrets, or other resources. Repeat the exact `scripts/live-canary.mjs` command from section 3 after rollback, not only `/healthz`.
+Select only a deployment created after the most recent upload-token rotation. Keep rollback interactive: if Wrangler reports changed secrets or API error `10220`, answer no, cancel the rollback, and never force it. To restore older reviewed code, check out that source and deploy it with the current protected secrets instead:
+
+```bash
+CLOUDFLARE_INCLUDE_PROCESS_ENV=false WRANGLER_SEND_METRICS=false \
+  npx --yes wrangler@4.125.0 deploy \
+    --config worker/wrangler.jsonc \
+    --strict \
+    --secrets-file /home/node/.config/keydrop/worker-secrets.env
+```
+
+Do not roll back or redeploy code from before the `v1` Durable Object migration; code rollback cannot undo a Durable Object class migration. Neither path rolls back existing R2 objects, Durable Object data, bucket lifecycle rules, or other resources.
+
+After a successful rollback or reviewed-source redeploy, explicitly reapply the current upload secret, then repeat the exact `scripts/live-canary.mjs` command from section 3, not only `/healthz`:
+
+```bash
+npx --yes wrangler@4.125.0 secret put UPLOAD_TOKEN \
+  --config worker/wrangler.jsonc \
+  < /home/node/.config/keydrop/upload-token
+```
 
 After the recipient confirms success, remove the local password file:
 
