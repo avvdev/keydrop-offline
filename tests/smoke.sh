@@ -4,7 +4,10 @@ set -euo pipefail
 expected_fixture_sha="6c4277f79eea8644f28ee6b0eb38486a1c8147610c38f6a83c0e6d02428a0201"
 actual_fixture_sha="$(sha256sum smoke-not-a-secret.toml.enc | awk '{print $1}')"
 test "$actual_fixture_sha" = "$expected_fixture_sha"
-grep -F 'keydrop-offline-spike-v5' service-worker.js >/dev/null
+grep -F 'self.registration.unregister()' service-worker.js >/dev/null
+grep -F 'client.navigate(client.url)' service-worker.js >/dev/null
+! grep -F 'serviceWorker.register' decrypt.bundle.js >/dev/null
+! grep -F 'serviceWorker.register' worker/public/decrypt.bundle.js >/dev/null
 grep -F 'id="download-and-select"' index.html >/dev/null
 grep -F 'src="autoselect.js"' index.html >/dev/null
 test "$(grep '^!' .assetsignore | cut -c2- | sort)" = "$(printf '%s\n' autoselect.js decrypt.bundle.js icon.svg index.html manifest.webmanifest smoke-not-a-secret.toml.enc | sort)"
