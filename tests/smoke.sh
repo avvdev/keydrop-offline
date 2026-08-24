@@ -156,6 +156,150 @@ main().catch((error) => {
 });
 NODE
 
+test -x keydrop
+node --input-type=module <<'NODE'
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import vm from "node:vm";
+
+function run(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("./keydrop", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+async function decryptWithBrowserBundle(encrypted, password) {
+  function element() {
+    return {
+      dataset: {}, files: [], textContent: "", type: "", value: "", handlers: {},
+      addEventListener(name, handler) { this.handlers[name] = handler; },
+    };
+  }
+  class TestFile extends Blob {
+    constructor(parts, name, options) { super(parts, options); this.name = name; }
+  }
+  const elements = {
+    "#decrypt-form": element(), "#encrypted-file": element(), "#file-info": element(),
+    "#password": element(), "#fill-test-password": element(), "#toggle-password": element(),
+    "#status": element(),
+  };
+  elements["#encrypted-file"].files = [new TestFile([encrypted], "delivery.enc")];
+  elements["#password"].value = password;
+  let downloaded;
+  const context = {
+    ArrayBuffer, Blob, DataView, File: TestFile, Promise, TextDecoder, TextEncoder,
+    Uint8Array, Uint16Array, Uint32Array, atob, btoa, console, crypto: globalThis.crypto,
+    document: {
+      currentScript: null,
+      querySelector(selector) { return elements[selector]; },
+      createElement() { return { click() {}, download: "", href: "" }; },
+    },
+    navigator: {},
+    setImmediate,
+    setTimeout(callback) { queueMicrotask(callback); return 0; },
+    clearTimeout() {}, queueMicrotask,
+    URL: {
+      createObjectURL(blob) { downloaded = blob; return "blob:test"; },
+      revokeObjectURL() {},
+    },
+  };
+  context.globalThis = context;
+  context.self = context;
+  context.window = context;
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync("decrypt.bundle.js", "utf8"), context, {
+    filename: "decrypt.bundle.js", timeout: 120_000,
+  });
+  await elements["#decrypt-form"].handlers.submit({ preventDefault() {} });
+  assert.equal(elements["#status"].textContent, "Готово. Файл расшифрован на этом устройстве.");
+  return new Uint8Array(await downloaded.arrayBuffer());
+}
+
+const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "keydrop-cli-test-"));
+const token = "upload-token-for-smoke-test-only-1234567890";
+const secret = Buffer.from("CLI roundtrip plaintext that must never reach the server");
+const tokenFile = path.join(temporary, "upload-token");
+const inputFile = path.join(temporary, "input.bin");
+const passwordFile = path.join(temporary, "delivery.pass");
+fs.writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 });
+fs.writeFileSync(inputFile, secret, { mode: 0o600 });
+
+let captured;
+let rejectUpload = false;
+const deliveryToken = "A".repeat(43);
+const server = http.createServer(async (request, response) => {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  const body = Buffer.concat(chunks);
+  captured = { url: request.url, headers: request.headers, body };
+  if (rejectUpload) {
+    response.writeHead(503).end("unavailable");
+    return;
+  }
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  response.writeHead(201, { "Content-Type": "application/json" });
+  response.end(JSON.stringify({ url: `${origin}/#${deliveryToken}` }));
+});
+await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+const origin = `http://127.0.0.1:${server.address().port}/`;
+
+try {
+  const result = await run([
+    "send", inputFile, "--endpoint", origin, "--token-file", tokenFile,
+    "--password-out", passwordFile, "--ttl", "300",
+  ]);
+  const expectedUrl = `${origin}#${deliveryToken}\n`;
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, expectedUrl);
+  assert.equal(result.stderr, "");
+  assert.equal(captured.url, "/api/v1/drops");
+  assert.equal(captured.headers.authorization, `Bearer ${token}`);
+  assert.equal(captured.headers["x-keydrop-ttl"], "300");
+  assert.equal(captured.headers["x-keydrop-sha256"], createHash("sha256").update(captured.body).digest("hex"));
+  assert.equal(captured.body.subarray(0, 11).toString(), "zDKO6XYXioc");
+  assert.equal(captured.body.includes(secret), false);
+
+  const password = fs.readFileSync(passwordFile, "utf8").trim();
+  assert.match(password, /^(?:[0123456789ABCDEFGHJKMNPQRSTVWXYZ]{5}-){5}[0123456789ABCDEFGHJKMNPQRSTVWXYZ]$/);
+  assert.equal(fs.statSync(passwordFile).mode & 0o777, 0o600);
+  assert.equal(result.stdout.includes(password), false);
+  assert.equal(result.stderr.includes(password), false);
+  assert.equal(captured.body.includes(Buffer.from(password)), false);
+  assert.equal(result.stdout.includes(token), false);
+  assert.equal(result.stderr.includes(token), false);
+  assert.deepEqual(await decryptWithBrowserBundle(captured.body, password), new Uint8Array(secret));
+
+  rejectUpload = true;
+  const failedPassword = path.join(temporary, "failed.pass");
+  const failed = await run([
+    "send", inputFile, "--endpoint", origin, "--token-file", tokenFile,
+    "--password-out", failedPassword, "--ttl", "300",
+  ]);
+  assert.equal(failed.code, 1);
+  assert.equal(failed.stdout, "");
+  assert.match(failed.stderr, /^keydrop: upload rejected\n$/);
+  assert.equal(fs.existsSync(failedPassword), false);
+  assert.equal(failed.stderr.includes(token), false);
+  console.log("PASS standalone CLI secrecy, mode 0600 password, failure cleanup, browser-compatible roundtrip");
+} finally {
+  server.close();
+  fs.rmSync(temporary, { recursive: true, force: true });
+}
+NODE
+
 node --input-type=module <<'NODE'
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
