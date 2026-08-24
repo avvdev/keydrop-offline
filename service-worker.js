@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE = "keydrop-offline-spike-v3";
+const CACHE = "keydrop-offline-spike-v4";
 const ASSETS = [
   "./",
   "./index.html",
