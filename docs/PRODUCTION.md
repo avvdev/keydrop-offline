@@ -33,7 +33,7 @@ awk '{ print "UPLOAD_TOKEN=" $0 }' \
 chmod 0600 /home/node/.config/keydrop/worker-secrets.env
 ```
 
-Add a lifecycle backstop for an object orphaned between R2 write and Durable Object initialization. Normal deletion still happens at ACK or TTL. The one-day rule schedules remaining `drops/` objects for expiry; Cloudflare may take additional time to physically delete expired objects, so this is not a strict 24-hour retention cap:
+Add a lifecycle backstop for an object orphaned between R2 write and Durable Object initialization. Normal recipient deliveries remain available until TTL and are then deleted by the Durable Object alarm. The one-day rule schedules remaining `drops/` objects for expiry; Cloudflare may take additional time to physically delete expired objects, so this is not a strict 24-hour retention cap:
 
 ```bash
 npx --yes wrangler@4.125.0 r2 bucket lifecycle add \
@@ -104,7 +104,7 @@ node scripts/live-canary.mjs \
   --token-file /home/node/.config/keydrop/upload-token
 ```
 
-The deployment is not accepted until the last command prints exactly `PASS keydrop live data-plane canary`. It creates only random fake plaintext, verifies upload → claim → checksum → shipped-browser-bundle decryption → ACK → idempotent ACK → replay `410`, prints no capability or password, and removes its local password artifact. On failure, any remote fake ciphertext is still bounded by the five-minute TTL and lifecycle backstop.
+The deployment is not accepted until the last command prints exactly `PASS keydrop live data-plane canary`. It creates only random fake plaintext, verifies upload → two independent claims and downloads → checksum → shipped-browser-bundle decryption → legacy ACK is rejected and non-destructive → upload-authenticated revoke → replay `410`, prints no capability or password, and removes its local password artifact. On failure, any remote fake ciphertext is still bounded by the five-minute TTL and lifecycle backstop.
 
 `workers_dev` is intentionally enabled for the first deployment. If a custom domain is later configured, set `workers_dev` to `false` and verify the `workers.dev` origin is no longer a bypass.
 
@@ -181,11 +181,11 @@ This reliable gate briefly writes plaintext into the private job directory. Clea
 
 1. Open the URL in Brave or Fennec.
 2. The fragment is removed from browser history immediately.
-3. The page claims one lease and loads ciphertext directly into memory; Android's file picker is not used.
+3. The page loads ciphertext directly into memory; Android's file picker is not used.
 4. Enter the separately received password and decrypt.
-5. Keep the page open until it says `Готово. Серверная копия удалена.`
+5. If Android or the embedded browser does not preserve the decrypted download, open the original URL from Telegram again and retry before its TTL expires.
 
-If acknowledgement loses its response, the browser records an `ack` phase in `sessionStorage` and retries on the next open. The same winning lease receives `204` after confirmed R2 deletion, including an idempotent retry. A `410` closes the local capability but is not presented as proof of immediate physical deletion; TTL, alarm, and lifecycle cleanup remain the backstop. If Android fails to persist the decrypted download, retry decryption in the same still-open page before closing it.
+The fragment is retained only in page memory and, when available, `sessionStorage`; the original Telegram message is the recoverable copy of the capability URL. Independent browser sessions may claim and download the same ciphertext until the fixed TTL. If browser storage or an embedded WebView loses local state, reopen that original URL rather than merely refreshing the stripped page. The legacy ACK endpoint returns `409` without deleting anything so an already-open old page cannot destroy a repeatable delivery. Only the upload-authenticated revoke path used by trusted operations can remove it early. A `410` means the drop expired, was explicitly revoked, or its backing object is unavailable.
 
 ## 7. Rotation, rollback, and cleanup
 
@@ -244,7 +244,7 @@ On CLI failure or `SIGINT`/`SIGTERM`/`SIGHUP`, Keydrop truncates and syncs the c
 ## 8. Operational checks
 
 - `/healthz` proves Worker routing, not R2/DO health.
-- The mandatory `scripts/live-canary.mjs` post-deploy and post-rollback gate uses fake plaintext and completes upload, claim, payload, shipped-bundle decrypt, idempotent ACK, and replay rejection.
+- The mandatory `scripts/live-canary.mjs` post-deploy and post-rollback gate uses fake plaintext and completes upload, independent repeat claims/downloads, shipped-bundle decrypt, rejected non-destructive legacy ACK, authenticated revoke, and replay rejection.
 - No drop-listing endpoint exists by design.
 - Keep application observability free of URLs, fragments, authorization headers, password paths, filenames, payloads, and hashes tied to a recipient.
 - Alert on upload `5xx`, missing/stale canary success, R2 lifecycle drift, or repeated cleanup failures; do not log secrets to make diagnosis easier.

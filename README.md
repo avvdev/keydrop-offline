@@ -7,13 +7,13 @@ file or stdin -> local Argon2id + XChaCha20 encryption -> private R2
                                                         |
 Telegram or console <- URL with 256-bit fragment <- Worker + Durable Object
                                                         |
-password file (0600, separate channel) -> browser decrypt -> ACK -> delete
+password file (0600, separate channel) -> browser decrypt -> repeatable until TTL
 ```
 
 The repository contains:
 
 - `keydrop`: standalone Node.js 22 CLI; stdout is only the delivery URL;
-- `worker/`: Cloudflare Worker, private R2 binding, and Durable Object lease state;
+- `worker/`: Cloudflare Worker, private R2 binding, and Durable Object TTL state;
 - `index.html`, `autoselect.js`, `decrypt.bundle.js`: same-origin browser receiver;
 - `scripts/check-keydrop-build.sh`: pinned, integrity-checked, ephemeral CLI rebuild;
 - `tests/smoke.sh`: crypto round-trip, secret-lifecycle, race, API, and browser-flow tests.
@@ -30,7 +30,7 @@ No Cloudflare resource is created by the tests. Production bootstrap, deployment
 
 ## Security boundary
 
-The URL is a bearer capability and must be treated as secret. Send the URL and password through different channels. A winning browser lease may retry the ciphertext until acknowledgement; “one-time” means one recipient lease, then deletion after ACK or TTL, not one irreversible HTTP packet.
+The URL is a bearer capability and must be treated as secret. Send the URL and password through different channels. Any browser holding the URL may fetch the authenticated ciphertext repeatedly until its fixed TTL. Browser download or decryption events never delete the server copy. A legacy acknowledgement is rejected with `409`; the Worker alarm deletes the object after expiry. The upload-authenticated revoke route exists only for trusted operational cleanup and live canaries.
 
 Limits: ciphertext is at most 16 MiB, TTL is 5 minutes to 12 hours, and the R2 lifecycle rule is a one-day orphan backstop. The CLI does not delete its input. Filesystems and SSDs do not promise secure erasure.
 
