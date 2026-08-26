@@ -1,6 +1,6 @@
 # Keydrop
 
-Keydrop delivers a small encrypted file through a short-lived, capability URL. The server stores only authenticated ciphertext; the password is created locally and never sent to the service. Decryption happens in Brave or Fennec with the existing offline-tested browser bundle.
+Keydrop delivers a small encrypted file through a short-lived, capability URL. The server stores only authenticated ciphertext; the password is created or supplied locally and never sent to the service. Decryption happens in Brave or Fennec with the existing offline-tested browser bundle.
 
 ```text
 file or stdin -> local Argon2id + XChaCha20 encryption -> private R2
@@ -9,6 +9,17 @@ Telegram or console <- URL with 256-bit fragment <- Worker + Durable Object
                                                         |
 password file (0600, separate channel) -> browser decrypt -> repeatable until TTL
 ```
+
+Automation may supply an already-known password through a dedicated inherited file descriptor:
+
+```bash
+keydrop send profile.toml \
+  --endpoint https://drop.example/ \
+  --token-file /run/secrets/keydrop-upload-token \
+  --password-fd 3 3<password.pipe
+```
+
+`--password-fd` and `--password-out` are mutually exclusive. The file-descriptor mode does not create a password file; callers must use a private pipe and must not put the password in argv or environment variables.
 
 The repository contains:
 

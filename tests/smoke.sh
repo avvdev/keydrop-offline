@@ -34,7 +34,7 @@ node --check scripts/live-canary.mjs
 test "$(node scripts/live-canary.mjs --help)" = "usage: node scripts/live-canary.mjs --endpoint URL --token-file FILE"
 test -x scripts/check-keydrop-build.sh
 bash scripts/check-keydrop-build.sh
-test "$(./keydrop --help 2>&1)" = "usage: keydrop send FILE|- --endpoint URL --token-file FILE --password-out FILE [--ttl SECONDS]"
+test "$(./keydrop --help 2>&1)" = "usage: keydrop send FILE|- --endpoint URL --token-file FILE (--password-out FILE | --password-fd FD) [--ttl SECONDS]"
 
 node <<'NODE'
 const assert = require("node:assert/strict");
@@ -195,11 +195,16 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import vm from "node:vm";
 
-function run(args, onSpawn) {
+function run(args, onSpawn, suppliedPassword) {
   return new Promise((resolve, reject) => {
-    const child = spawn("./keydrop", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const stdio = suppliedPassword === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", "pipe"];
+    const child = spawn("./keydrop", args, { stdio });
     const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("CLI timeout")); }, 20_000);
     onSpawn?.(child);
+    if (suppliedPassword !== undefined) {
+      child.stdio[3].on("error", () => {});
+      child.stdio[3].end(suppliedPassword);
+    }
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -319,6 +324,42 @@ try {
   assert.equal(result.stderr.includes(token), false);
   assert.deepEqual(await decryptWithBrowserBundle(captured.body, password), new Uint8Array(secret));
 
+  behavior = "ok";
+  const suppliedPassword = "correct horse battery staple #42";
+  const supplied = await run([
+    "send", inputFile, "--endpoint", origin, "--token-file", tokenFile,
+    "--password-fd", "3", "--ttl", "300",
+  ], undefined, suppliedPassword);
+  assert.equal(supplied.code, 0);
+  assert.equal(supplied.stderr, "");
+  assert.equal(supplied.stdout, `${origin}#${deliveryToken}\n`);
+  assert.equal(supplied.stdout.includes(suppliedPassword), false);
+  assert.equal(supplied.stderr.includes(suppliedPassword), false);
+  assert.equal(captured.body.includes(Buffer.from(suppliedPassword)), false);
+  assert.deepEqual(await decryptWithBrowserBundle(captured.body, suppliedPassword), new Uint8Array(secret));
+  assert.equal(fs.readdirSync(temporary).some((name) => name.includes("supplied")), false);
+
+  const bothModes = await run([
+    "send", inputFile, "--endpoint", origin, "--token-file", tokenFile,
+    "--password-out", path.join(temporary, "both.pass"), "--password-fd", "3", "--ttl", "300",
+  ], undefined, suppliedPassword);
+  assert.equal(bothModes.code, 1);
+  assert.match(bothModes.stderr, /^keydrop: exactly one password mode is required\n$/);
+
+  const emptyPassword = await run([
+    "send", inputFile, "--endpoint", origin, "--token-file", tokenFile,
+    "--password-fd", "3", "--ttl", "300",
+  ], undefined, "");
+  assert.equal(emptyPassword.code, 1);
+  assert.match(emptyPassword.stderr, /^keydrop: password must be between 1 and 1024 bytes\n$/);
+
+  const lineBreakPassword = await run([
+    "send", inputFile, "--endpoint", origin, "--token-file", tokenFile,
+    "--password-fd", "3", "--ttl", "300",
+  ], undefined, "secret\nvalue");
+  assert.equal(lineBreakPassword.code, 1);
+  assert.match(lineBreakPassword.stderr, /^keydrop: password must not contain NUL or line breaks\n$/);
+
   behavior = "pause-reject";
   const failedPassword = path.join(temporary, "failed.pass");
   const movedPassword = path.join(temporary, "moved.pass");
@@ -374,7 +415,7 @@ try {
   releaseUpload();
   assert.equal(signalled.code, 129);
   assert.equal(fs.existsSync(signalPassword), false);
-  console.log("PASS standalone CLI secrecy, mode 0600 password, failure cleanup, browser-compatible roundtrip");
+  console.log("PASS standalone CLI secrecy, generated and inherited-FD passwords, failure cleanup, browser-compatible roundtrip");
 } finally {
   server.close();
   fs.rmSync(temporary, { recursive: true, force: true });

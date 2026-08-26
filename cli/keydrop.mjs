@@ -1,13 +1,14 @@
 import sodium from "libsodium-wrappers-sumo";
 import { createHash, randomBytes } from "node:crypto";
 import { open } from "node:fs/promises";
-import { closeSync, constants, fstatSync, fsyncSync, ftruncateSync, lstatSync, openSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, ftruncateSync, lstatSync, openSync, readSync, unlinkSync, writeFileSync } from "node:fs";
 
 const SIGNATURE = new TextEncoder().encode("zDKO6XYXioc");
 const SALT_BYTES = 16, HEADER_BYTES = 24, AUTH_BYTES = 17;
 const MAX_CIPHERTEXT = 16 * 1024 * 1024, MAX_PLAINTEXT = MAX_CIPHERTEXT - SIGNATURE.length - SALT_BYTES - HEADER_BYTES - AUTH_BYTES;
 const TOKEN_RE = /^[A-Za-z0-9._~-]{32,512}$/, DELIVERY_RE = /^[A-Za-z0-9_-]{43}$/, ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-const USAGE = "usage: keydrop send FILE|- --endpoint URL --token-file FILE --password-out FILE [--ttl SECONDS]";
+const MAX_PASSWORD_BYTES = 1024;
+const USAGE = "usage: keydrop send FILE|- --endpoint URL --token-file FILE (--password-out FILE | --password-fd FD) [--ttl SECONDS]";
 let incompletePassword;
 
 process.umask(0o077);
@@ -33,7 +34,7 @@ function parse(argv) {
   for (let index = 2; index < argv.length; index += 2) {
     const flag = argv[index];
     const value = argv[index + 1];
-    if (!value || !["--endpoint", "--token-file", "--password-out", "--ttl"].includes(flag)) {
+    if (!value || !["--endpoint", "--token-file", "--password-out", "--password-fd", "--ttl"].includes(flag)) {
       throw new Error("invalid arguments");
     }
     if (seen.has(flag)) throw new Error("duplicate option");
@@ -41,7 +42,16 @@ function parse(argv) {
     const key = flag.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
     options[key] = value;
   }
-  if (!options.endpoint || !options.tokenFile || !options.passwordOut) throw new Error("missing required option");
+  if (!options.endpoint || !options.tokenFile) throw new Error("missing required option");
+  if (Boolean(options.passwordOut) === Boolean(options.passwordFd)) {
+    throw new Error("exactly one password mode is required");
+  }
+  if (options.passwordFd !== undefined) {
+    options.passwordFd = Number(options.passwordFd);
+    if (!Number.isInteger(options.passwordFd) || options.passwordFd < 3 || options.passwordFd > 1024) {
+      throw new Error("password fd must be an integer between 3 and 1024");
+    }
+  }
   options.ttl = Number(options.ttl);
   if (!Number.isInteger(options.ttl) || options.ttl < 300 || options.ttl > 43200) {
     throw new Error("ttl must be between 300 and 43200 seconds");
@@ -123,6 +133,39 @@ function password() {
   if (bits) encoded += ALPHABET[(value << (5 - bits)) & 31];
   bytes.fill(0);
   return encoded.match(/.{1,5}/g).join("-");
+}
+
+function passwordFromFd(fd) {
+  const buffer = Buffer.alloc(MAX_PASSWORD_BYTES + 1);
+  let offset = 0;
+  try {
+    while (offset < buffer.length) {
+      const bytesRead = readSync(fd, buffer, offset, buffer.length - offset, null);
+      if (!bytesRead) break;
+      offset += bytesRead;
+    }
+  } catch {
+    buffer.fill(0);
+    throw new Error("password fd read failed");
+  } finally {
+    try { closeSync(fd); } catch {}
+  }
+  if (!offset || offset > MAX_PASSWORD_BYTES) {
+    buffer.fill(0);
+    throw new Error("password must be between 1 and 1024 bytes");
+  }
+  const passphrase = buffer.subarray(0, offset);
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(passphrase);
+  } catch {
+    buffer.fill(0);
+    throw new Error("password must be valid UTF-8");
+  }
+  if (passphrase.includes(0) || passphrase.includes(10) || passphrase.includes(13)) {
+    buffer.fill(0);
+    throw new Error("password must not contain NUL or line breaks");
+  }
+  return passphrase;
 }
 
 async function encrypt(input, passphrase) {
@@ -259,12 +302,14 @@ async function main() {
   try {
     token = await uploadToken(options.tokenFile);
     cleartext = await plaintext(options.input);
-    passphrase = password();
+    passphrase = options.passwordFd === undefined ? password() : passwordFromFd(options.passwordFd);
     ciphertext = await encrypt(cleartext, passphrase);
-    savePassword(options.passwordOut, passphrase);
+    if (options.passwordOut) savePassword(options.passwordOut, passphrase);
     const delivery = await upload(origin, token, options.ttl, ciphertext);
-    closeSync(incompletePassword.fd);
-    incompletePassword = undefined;
+    if (incompletePassword) {
+      closeSync(incompletePassword.fd);
+      incompletePassword = undefined;
+    }
     succeeded = true;
     process.stdout.write(`${delivery}\n`);
   } finally {
@@ -272,6 +317,7 @@ async function main() {
     cleartext?.fill(0);
     ciphertext?.fill(0);
     token = undefined;
+    if (Buffer.isBuffer(passphrase)) passphrase.fill(0);
     passphrase = undefined;
   }
 }
