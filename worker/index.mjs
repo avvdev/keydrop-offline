@@ -2,7 +2,6 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 const MAX_BYTES = 16 * 1024 * 1024;
 const DEFAULT_TTL = 1800;
 const MAX_TTL = 43200;
-const LEASE_MS = 15 * 60 * 1000;
 const TEST_FIXTURE_BASE64 = "ekRLTzZYWVhpb2MG5RiPwa8aXbSjTZVbtuJ0j74NTnvAxmjRcxXycCtY4g2Ecw6p8Ll3u49nassBW7o368B7W2JCgPG10oUIXDoTBMOF+la+iCXCssbXw/i9+/hULx5G0xY=";
 
 export default {
@@ -14,6 +13,9 @@ export default {
       }
       if (request.method === "POST" && url.pathname === "/api/v1/drops") {
         return await upload(request, env);
+      }
+      if (request.method === "DELETE" && url.pathname === "/api/v1/drop") {
+        return await revoke(request, env);
       }
       const action = apiAction(request.method, url.pathname);
       if (action) return await dispatchDrop(request, env, action);
@@ -43,6 +45,7 @@ export class DropSession {
     if (action === "claim" && request.method === "POST") return this.claim(request);
     if (action === "payload" && request.method === "GET") return this.payload(request);
     if (action === "ack" && request.method === "POST") return this.ack(request);
+    if (action === "revoke" && request.method === "POST") return this.revoke();
     return fail(404, "not_found");
   }
 
@@ -61,24 +64,9 @@ export class DropSession {
   async claim(request) {
     const lease = request.headers.get("x-keydrop-lease") || "";
     if (!TOKEN_RE.test(lease)) return fail(400, "invalid_lease");
-    const leaseHash = await sha256Hex(lease);
-    const now = Date.now();
-    const result = await this.ctx.storage.transaction(async (tx) => {
-      const state = await tx.get("drop");
-      if (!state) return { status: 410 };
-      if (state.expiresAt <= now) return { status: 410, expired: state };
-      if (state.status === "consuming" || state.status === "consumed") return { status: 410 };
-      if (state.status === "leased" && state.leaseUntil > now && state.leaseHash !== leaseHash) {
-        return { status: 410 };
-      }
-      state.status = "leased";
-      state.leaseHash = leaseHash;
-      state.leaseUntil = Math.min(state.expiresAt, now + LEASE_MS);
-      await tx.put("drop", state);
-      return { status: 204 };
-    });
+    const result = await this.availableState();
     if (result.expired) await this.cleanup(result.expired);
-    return new Response(null, { status: result.status });
+    return new Response(null, { status: result.state ? 204 : 410 });
   }
 
   async payload(request) {
@@ -101,60 +89,33 @@ export class DropSession {
   }
 
   async ack(request) {
-    const result = await this.beginAck(request);
+    const lease = request.headers.get("x-keydrop-lease") || "";
+    if (!TOKEN_RE.test(lease)) return fail(400, "invalid_lease");
+    const result = await this.availableState();
     if (result.expired) await this.cleanup(result.expired);
     if (!result.state) return fail(410, "gone");
-    if (!result.consumed) {
-      await this.env.DROPS.delete(result.state.r2Key);
-      await this.ctx.storage.transaction(async (tx) => {
-        const state = await tx.get("drop");
-        if (!state || state.status !== "consuming" || state.ackLeaseHash !== result.leaseHash) return;
-        state.status = "consumed";
-        await tx.put("drop", state);
-      });
-    }
-    return new Response(null, { status: 204, headers: noStoreHeaders() });
+    return fail(409, "ttl_only");
   }
 
   async authorizePayload(request) {
     const lease = request.headers.get("x-keydrop-lease") || "";
     if (!TOKEN_RE.test(lease)) return {};
-    const leaseHash = await sha256Hex(lease);
-    const now = Date.now();
-    return this.ctx.storage.transaction(async (tx) => {
-      const state = await tx.get("drop");
-      if (!state) return {};
-      if (state.expiresAt <= now) return { expired: state };
-      if (state.status !== "leased" || state.leaseUntil <= now || state.leaseHash !== leaseHash) return {};
-      state.leaseUntil = Math.min(state.expiresAt, now + LEASE_MS);
-      await tx.put("drop", state);
-      return { state };
-    });
+    return this.availableState();
   }
 
-  async beginAck(request) {
-    const lease = request.headers.get("x-keydrop-lease") || "";
-    if (!TOKEN_RE.test(lease)) return {};
-    const leaseHash = await sha256Hex(lease);
-    const now = Date.now();
-    return this.ctx.storage.transaction(async (tx) => {
-      const state = await tx.get("drop");
-      if (!state) return {};
-      if (state.expiresAt <= now) return { expired: state };
-      if (state.status === "consumed" && state.ackLeaseHash === leaseHash) {
-        return { state, leaseHash, consumed: true };
-      }
-      if (state.status === "consuming" && state.ackLeaseHash === leaseHash) {
-        return { state, leaseHash, consumed: false };
-      }
-      if (state.status !== "leased" || state.leaseHash !== leaseHash) return {};
-      state.status = "consuming";
-      state.ackLeaseHash = leaseHash;
-      delete state.leaseHash;
-      delete state.leaseUntil;
-      await tx.put("drop", state);
-      return { state, leaseHash, consumed: false };
-    });
+  async availableState() {
+    const state = await this.ctx.storage.get("drop");
+    if (!state) return {};
+    if (state.expiresAt <= Date.now()) return { expired: state };
+    if (state.status === "consuming" || state.status === "consumed") return {};
+    return { state };
+  }
+
+  async revoke() {
+    const state = await this.ctx.storage.get("drop");
+    if (state) await this.env.DROPS.delete(state.r2Key);
+    await this.ctx.storage.deleteAll();
+    return new Response(null, { status: 204, headers: noStoreHeaders() });
   }
 
   async cleanup(state) {
@@ -221,6 +182,15 @@ async function dispatchDrop(request, env, action) {
     headers: { "x-keydrop-lease": lease },
   });
   return noStore(await stub.fetch(forwarded));
+}
+
+async function revoke(request, env) {
+  if (!(await uploadAuthorized(request, env.UPLOAD_TOKEN))) return fail(401, "unauthorized");
+  const token = request.headers.get("x-keydrop-token") || "";
+  if (!TOKEN_RE.test(token)) return fail(400, "invalid_token");
+  const digest = await sha256Hex(token);
+  const stub = env.DROP_SESSIONS.get(env.DROP_SESSIONS.idFromName(digest));
+  return noStore(await stub.fetch(new Request("https://drop.internal/revoke", { method: "POST" })));
 }
 
 function apiAction(method, path) {

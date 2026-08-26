@@ -496,28 +496,46 @@ const leases = Array.from({ length: 50 }, lease);
 const claims = await Promise.all(leases.map((value) => worker.fetch(
   access("POST", "/api/v1/drop/claim", token, value), env,
 )));
-assert.equal(claims.filter((response) => response.status === 204).length, 1);
-assert.equal(claims.filter((response) => response.status === 410).length, 49);
-const winner = leases[claims.findIndex((response) => response.status === 204)];
-assert.equal((await worker.fetch(access("POST", "/api/v1/drop/claim", token, winner), env)).status, 204);
-assert.equal((await worker.fetch(access("GET", "/api/v1/drop", token, lease()), env)).status, 410);
+assert.equal(claims.filter((response) => response.status === 204).length, 50);
 
-const session = sessions.sessions.get(storedKey.slice("drops/".length));
-const expiredLease = await session.ctx.storage.get("drop");
-expiredLease.leaseUntil = Date.now() - 1;
-await session.ctx.storage.put("drop", expiredLease);
-const replacement = lease();
-assert.equal((await worker.fetch(access("POST", "/api/v1/drop/claim", token, replacement), env)).status, 204);
-assert.equal((await worker.fetch(access("POST", "/api/v1/drop/ack", token, winner), env)).status, 410);
+for (const recipientLease of [leases[0], leases[1], leases[0]]) {
+  const payload = await worker.fetch(access("GET", "/api/v1/drop", token, recipientLease), env);
+  assert.equal(payload.status, 200);
+  assert.equal(payload.headers.get("cache-control"), "no-store, private, max-age=0");
+  assert.deepEqual(new Uint8Array(await payload.arrayBuffer()), ciphertext);
+}
 
-const payload = await worker.fetch(access("GET", "/api/v1/drop", token, replacement), env);
-assert.equal(payload.status, 200);
-assert.equal(payload.headers.get("cache-control"), "no-store, private, max-age=0");
-assert.deepEqual(new Uint8Array(await payload.arrayBuffer()), ciphertext);
-assert.equal((await worker.fetch(access("POST", "/api/v1/drop/ack", token, replacement), env)).status, 204);
+assert.equal((await worker.fetch(access("POST", "/api/v1/drop/ack", token, leases[0]), env)).status, 409);
+assert.equal(bucket.values.size, 1);
+assert.equal((await worker.fetch(access("GET", "/api/v1/drop", token, leases[1]), env)).status, 200);
+
+const deniedRevoke = await worker.fetch(new Request("https://drop.test/api/v1/drop", {
+  method: "DELETE",
+  headers: { Authorization: `Bearer ${"v".repeat(48)}`, "X-Keydrop-Token": token },
+}), env);
+assert.equal(deniedRevoke.status, 401);
+assert.equal(bucket.values.size, 1);
+
+for (const invalidToken of ["", "not-a-capability"]) {
+  const invalidRevoke = await worker.fetch(new Request("https://drop.test/api/v1/drop", {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${secret}`, "X-Keydrop-Token": invalidToken },
+  }), env);
+  assert.equal(invalidRevoke.status, 400);
+  assert.equal(bucket.values.size, 1);
+}
+
+const revoked = await worker.fetch(new Request("https://drop.test/api/v1/drop", {
+  method: "DELETE",
+  headers: { Authorization: `Bearer ${secret}`, "X-Keydrop-Token": token },
+}), env);
+assert.equal(revoked.status, 204);
 assert.equal(bucket.values.size, 0);
-assert.equal((await worker.fetch(access("POST", "/api/v1/drop/ack", token, replacement), env)).status, 204);
-assert.equal((await worker.fetch(access("GET", "/api/v1/drop", token, replacement), env)).status, 410);
+assert.equal((await worker.fetch(access("GET", "/api/v1/drop", token, leases[1]), env)).status, 410);
+assert.equal((await worker.fetch(new Request("https://drop.test/api/v1/drop", {
+  method: "DELETE",
+  headers: { Authorization: `Bearer ${secret}`, "X-Keydrop-Token": token },
+}), env)).status, 204);
 
 const retryUpload = await worker.fetch(new Request("https://drop.test/api/v1/drops", {
   method: "POST", body: ciphertext,
@@ -530,10 +548,53 @@ const retryToken = new URL((await retryUpload.json()).url).hash.slice(1);
 const retryLease = lease();
 assert.equal((await worker.fetch(access("POST", "/api/v1/drop/claim", retryToken, retryLease), env)).status, 204);
 bucket.failDeleteOnce = true;
-assert.equal((await worker.fetch(access("POST", "/api/v1/drop/ack", retryToken, retryLease), env)).status, 500);
+assert.equal((await worker.fetch(new Request("https://drop.test/api/v1/drop", {
+  method: "DELETE",
+  headers: { Authorization: `Bearer ${secret}`, "X-Keydrop-Token": retryToken },
+}), env)).status, 500);
 assert.equal(bucket.values.size, 1);
-assert.equal((await worker.fetch(access("POST", "/api/v1/drop/ack", retryToken, retryLease), env)).status, 204);
+assert.equal((await worker.fetch(new Request("https://drop.test/api/v1/drop", {
+  method: "DELETE",
+  headers: { Authorization: `Bearer ${secret}`, "X-Keydrop-Token": retryToken },
+}), env)).status, 204);
 assert.equal(bucket.values.size, 0);
+
+const expiryUpload = await worker.fetch(new Request("https://drop.test/api/v1/drops", {
+  method: "POST", body: ciphertext,
+  headers: {
+    Authorization: `Bearer ${secret}`, "Content-Length": String(ciphertext.length),
+    "X-Keydrop-SHA256": checksum, "X-Keydrop-TTL": "300",
+  },
+}), env);
+const expiryToken = new URL((await expiryUpload.json()).url).hash.slice(1);
+const expiryKey = Array.from(bucket.values.keys())[0];
+const expirySession = sessions.sessions.get(expiryKey.slice("drops/".length));
+const expired = await expirySession.ctx.storage.get("drop");
+expired.expiresAt = Date.now() - 1;
+await expirySession.ctx.storage.put("drop", expired);
+assert.equal((await worker.fetch(access("GET", "/api/v1/drop", expiryToken, lease()), env)).status, 410);
+assert.equal(bucket.values.size, 0);
+
+const alarmUpload = await worker.fetch(new Request("https://drop.test/api/v1/drops", {
+  method: "POST", body: ciphertext,
+  headers: {
+    Authorization: `Bearer ${secret}`, "Content-Length": String(ciphertext.length),
+    "X-Keydrop-SHA256": checksum, "X-Keydrop-TTL": "300",
+  },
+}), env);
+const alarmToken = new URL((await alarmUpload.json()).url).hash.slice(1);
+const alarmKey = Array.from(bucket.values.keys())[0];
+const alarmSession = sessions.sessions.get(alarmKey.slice("drops/".length));
+const alarmState = await alarmSession.ctx.storage.get("drop");
+assert.equal(alarmSession.ctx.storage.alarm, alarmState.expiresAt);
+bucket.failDeleteOnce = true;
+await assert.rejects(() => alarmSession.alarm(), /temporary R2 delete failure/);
+assert.equal(bucket.values.size, 1);
+assert.ok(await alarmSession.ctx.storage.get("drop"));
+await alarmSession.alarm();
+assert.equal(bucket.values.size, 0);
+assert.equal(await alarmSession.ctx.storage.get("drop"), undefined);
+assert.equal((await worker.fetch(access("GET", "/api/v1/drop", alarmToken, lease()), env)).status, 410);
 
 const failedBucket = new Bucket();
 const failedEnv = {
@@ -571,7 +632,7 @@ assert.deepEqual(
   new Uint8Array(await (await import("node:fs/promises")).readFile("smoke-not-a-secret.toml.enc")),
 );
 assert.ok(!(/console\.(log|error|warn)/).test(await (await import("node:fs/promises")).readFile("worker/index.mjs", "utf8")));
-console.log("PASS Worker auth, fragment capability, atomic lease, no-store payload, acknowledgement cleanup");
+console.log("PASS Worker auth, repeatable TTL delivery, no-store payload, authenticated revoke cleanup");
 NODE
 
 node --input-type=module <<'NODE'
@@ -609,9 +670,7 @@ const selectors = [
 const elements = Object.fromEntries(selectors.map((selector) => [selector, element()]));
 const calls = [];
 const stored = new Map();
-const observers = [];
 let replacedWith = null;
-let ackAttempts = 0;
 
 const context = {
   Blob,
@@ -619,11 +678,6 @@ const context = {
   Event: class TestEvent { constructor(type) { this.type = type; } },
   File: TestFile,
   Headers,
-  MutationObserver: class TestObserver {
-    constructor(callback) { this.callback = callback; observers.push(this); }
-    observe() {}
-    disconnect() { this.disconnected = true; }
-  },
   Response,
   TextEncoder,
   Uint8Array,
@@ -633,11 +687,6 @@ const context = {
   fetch: async (path, options) => {
     calls.push({ path, options });
     if (path.endsWith("/claim")) return new Response(null, { status: 204 });
-    if (path.endsWith("/ack")) {
-      ackAttempts += 1;
-      if (ackAttempts === 1) throw new Error("response lost");
-      return new Response(null, { status: 204 });
-    }
     return new Response(encrypted, { headers: {
       "Content-Length": String(encrypted.length),
       "X-Keydrop-SHA256": checksum,
@@ -667,28 +716,47 @@ assert.ok(calls.every((call) => call.options.redirect === "error"));
 assert.equal(elements["#encrypted-file"].files[0].name, "delivery.enc");
 assert.equal(await elements["#encrypted-file"].files[0].text(), "one network payload");
 assert.equal(elements["#fill-test-password"].hidden, true);
-assert.equal(elements["#status"].textContent, "Файл получен и выбран. Введи пароль доставки.");
+assert.match(elements["#status"].textContent, /открыть повторно/);
+const firstLease = JSON.parse(stored.get("keydrop-active-v1")).lease;
 
 elements["#status"].textContent = "Готово. Файл расшифрован на этом устройстве.";
-observers[0].callback();
 await new Promise((resolve) => setImmediate(resolve));
-assert.equal(calls.length, 3);
-assert.equal(calls[2].path, "/api/v1/drop/ack");
-assert.equal(calls[2].options.keepalive, true);
-assert.equal(JSON.parse(stored.get("keydrop-active-v1")).phase, "ack");
-assert.match(elements["#status"].textContent, /повторится/);
+assert.equal(calls.length, 2);
+assert.deepEqual(JSON.parse(stored.get("keydrop-active-v1")), { token, lease: firstLease });
 
 await vm.runInContext("startProduction()", context);
 assert.equal(calls.length, 4);
-assert.equal(calls[3].path, "/api/v1/drop/ack");
-assert.equal(stored.size, 0);
-assert.equal(elements["#status"].textContent, "Готово. Серверная копия удалена.");
+assert.deepEqual(calls.slice(2).map((call) => call.path), ["/api/v1/drop/claim", "/api/v1/drop"]);
+assert.equal(calls[2].options.headers["X-Keydrop-Lease"], firstLease);
+assert.match(elements["#status"].textContent, /открыть повторно/);
 
-stored.set("keydrop-active-v1", JSON.stringify({ token, lease: randomBytes(32).toString("base64url"), phase: "ack" }));
-context.fetch = async () => new Response(null, { status: 410 });
+context.fetch = async (path, options) => {
+  calls.push({ path, options });
+  return new Response(null, { status: 410 });
+};
 await vm.runInContext("startProduction()", context);
 assert.equal(stored.size, 0);
-assert.match(elements["#status"].textContent, /не подтверждено/);
+assert.equal(elements["#status"].textContent, "Ссылка истекла");
 assert.equal(elements["#status"].dataset.error, "true");
-console.log("PASS fragment erased, one payload fetch, in-memory selection, recoverable acknowledgement");
+
+const storageFailureToken = randomBytes(32).toString("base64url");
+context.location.hash = `#${storageFailureToken}`;
+context.sessionStorage = {
+  getItem() { throw new Error("storage unavailable"); },
+  setItem() { throw new Error("storage unavailable"); },
+  removeItem() { throw new Error("storage unavailable"); },
+};
+context.fetch = async (path, options) => {
+  calls.push({ path, options });
+  if (path.endsWith("/claim")) return new Response(null, { status: 204 });
+  return new Response(encrypted, { headers: {
+    "Content-Length": String(encrypted.length),
+    "X-Keydrop-SHA256": checksum,
+  } });
+};
+await vm.runInContext("startProduction()", context);
+assert.equal(calls.length, 7);
+assert.equal(calls[calls.length - 2].options.headers.Authorization, `Keydrop ${storageFailureToken}`);
+assert.match(elements["#status"].textContent, /открыть повторно/);
+console.log("PASS fragment erased, repeatable payload fetch, no automatic acknowledgement, storage-failure fallback");
 NODE
