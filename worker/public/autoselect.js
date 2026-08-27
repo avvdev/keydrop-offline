@@ -5,6 +5,7 @@ const encryptedFileInput = document.querySelector("#encrypted-file");
 const encryptedFileInfo = document.querySelector("#file-info");
 const pageStatus = document.querySelector("#status");
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/;
+const filenamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const activeKey = "keydrop-active-v1";
 
 downloadAndSelect.addEventListener("click", async () => {
@@ -35,14 +36,20 @@ const productionReady = startProduction();
 async function startProduction() {
   const fragment = location.hash.slice(1);
   let saved = readActiveDrop();
-  if (tokenPattern.test(fragment)) {
+  const incoming = parseDropFragment(fragment);
+  if (fragment && !incoming) {
+    clearActiveDrop();
+    return;
+  }
+  if (incoming) {
     const replacement = `${location.pathname}${location.search || ""}`;
     history.replaceState(null, "", replacement);
-    const lease = saved?.token === fragment && tokenPattern.test(saved.lease) ? saved.lease : randomToken();
-    saved = { token: fragment, lease };
+    const lease = saved?.token === incoming.token && tokenPattern.test(saved.lease) ? saved.lease : randomToken();
+    saved = { token: incoming.token, lease, filename: incoming.filename };
     writeActiveDrop(saved);
   }
   if (!saved || !tokenPattern.test(saved.token) || !tokenPattern.test(saved.lease)) return;
+  const filename = filenamePattern.test(saved.filename || "") ? saved.filename : "delivery";
 
   setProductionMode();
   encryptedFileInfo.textContent = "Получаю зашифрованный файл…";
@@ -63,13 +70,23 @@ async function startProduction() {
     if (bytes.byteLength !== size) throw new Error("Файл получен не полностью");
     const expected = response.headers.get("x-keydrop-sha256") || "";
     if (expected !== await sha256Hex(bytes)) throw new Error("Контрольная сумма файла не совпала");
-    selectEncryptedFile(new File([bytes], "delivery.enc", { type: "application/octet-stream" }));
+    selectEncryptedFile(new File([bytes], `${filename}.enc`, { type: "application/octet-stream" }));
     pageStatus.textContent = "Файл получен и выбран. Введи пароль доставки. Эту ссылку можно открыть повторно до истечения срока.";
     pageStatus.dataset.error = "false";
   } catch (error) {
     pageStatus.textContent = error.message || "Не удалось получить файл";
     pageStatus.dataset.error = "true";
   }
+}
+
+function parseDropFragment(fragment) {
+  const parts = fragment.split("/");
+  if (!tokenPattern.test(parts[0]) || parts.length > 2) return null;
+  if (parts.length === 1) return { token: parts[0], filename: "delivery" };
+  let filename;
+  try { filename = decodeURIComponent(parts[1]); } catch { return null; }
+  if (!filenamePattern.test(filename)) return null;
+  return { token: parts[0], filename };
 }
 
 function setProductionMode() {

@@ -763,7 +763,7 @@ const firstLease = JSON.parse(stored.get("keydrop-active-v1")).lease;
 elements["#status"].textContent = "Готово. Файл расшифрован на этом устройстве.";
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(calls.length, 2);
-assert.deepEqual(JSON.parse(stored.get("keydrop-active-v1")), { token, lease: firstLease });
+assert.deepEqual(JSON.parse(stored.get("keydrop-active-v1")), { token, lease: firstLease, filename: "delivery" });
 
 await vm.runInContext("startProduction()", context);
 assert.equal(calls.length, 4);
@@ -799,5 +799,29 @@ await vm.runInContext("startProduction()", context);
 assert.equal(calls.length, 7);
 assert.equal(calls[calls.length - 2].options.headers.Authorization, `Keydrop ${storageFailureToken}`);
 assert.match(elements["#status"].textContent, /открыть повторно/);
-console.log("PASS fragment erased, repeatable payload fetch, no automatic acknowledgement, storage-failure fallback");
+
+const namedToken = randomBytes(32).toString("base64url");
+const namedStored = new Map();
+context.location.hash = `#${namedToken}/bcore2-ruvds-eu4-v0.7.1.toml`;
+context.sessionStorage = {
+  getItem(key) { return namedStored.get(key) ?? null; },
+  setItem(key, value) { namedStored.set(key, value); },
+  removeItem(key) { namedStored.delete(key); },
+};
+const beforeNamed = calls.length;
+await vm.runInContext("startProduction()", context);
+assert.equal(calls.length, beforeNamed + 2);
+assert.equal(elements["#encrypted-file"].files[0].name, "bcore2-ruvds-eu4-v0.7.1.toml.enc");
+assert.deepEqual(JSON.parse(namedStored.get("keydrop-active-v1")), {
+  token: namedToken,
+  lease: JSON.parse(namedStored.get("keydrop-active-v1")).lease,
+  filename: "bcore2-ruvds-eu4-v0.7.1.toml",
+});
+
+context.location.hash = `#${namedToken}/..%2Fprivate.toml`;
+const beforeMalformed = calls.length;
+await vm.runInContext("startProduction()", context);
+assert.equal(calls.length, beforeMalformed);
+assert.equal(namedStored.size, 0);
+console.log("PASS fragment erased, optional filename selected, malformed filename rejected, storage-failure fallback");
 NODE
