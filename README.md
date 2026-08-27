@@ -21,6 +21,16 @@ keydrop send profile.toml \
 
 `--password-fd` and `--password-out` are mutually exclusive. The file-descriptor mode does not create a password file; callers must use a private pipe and must not put the password in argv or environment variables.
 
+## Optional download filename
+
+The CLI still prints exactly `https://drop.example/#TOKEN`. A trusted integration may append one client-side filename to the fragment before delivering the URL:
+
+```text
+https://drop.example/#TOKEN/device-target-v0.7.1.toml
+```
+
+The browser decodes the suffix once, requires `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`, fetches the same ciphertext, and presents it to the decryptor as `device-target-v0.7.1.toml.enc`. The decrypted download is therefore saved as `device-target-v0.7.1.toml`. The suffix stays in the URL fragment and is never sent to the Worker. Invalid names or extra fragment segments are rejected before a drop request. Existing `#TOKEN` links remain compatible and use `delivery` as the filename.
+
 The repository contains:
 
 - `keydrop`: standalone Node.js 22 CLI; stdout is only the delivery URL;
@@ -41,7 +51,7 @@ No Cloudflare resource is created by the tests. Production bootstrap, deployment
 
 ## Security boundary
 
-The URL is a bearer capability and must be treated as secret. Send the URL and password through different channels. Any browser holding the URL may fetch the authenticated ciphertext repeatedly until its fixed TTL. Browser download or decryption events never delete the server copy. A legacy acknowledgement is rejected with `409`; the Worker alarm deletes the object after expiry. The upload-authenticated revoke route exists only for trusted operational cleanup and live canaries.
+The URL is a bearer capability and must be treated as secret. Send the URL and password through different channels. The optional filename is descriptive metadata, not an authorization control. Any browser holding the token may fetch the authenticated ciphertext repeatedly until its fixed TTL. Browser download or decryption events never delete the server copy. A legacy acknowledgement is rejected with `409`; the Worker alarm deletes the object after expiry. The upload-authenticated revoke route exists only for trusted operational cleanup and live canaries.
 
 Limits: ciphertext is at most 16 MiB, TTL is 5 minutes to 12 hours, and the R2 lifecycle rule is a one-day orphan backstop. The CLI does not delete its input. Filesystems and SSDs do not promise secure erasure.
 

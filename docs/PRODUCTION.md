@@ -134,6 +134,14 @@ sed -n '1p' /home/node/.local/state/keydrop/passwords/delivery-001.pass
 
 Do not paste URL and password into the same Telegram message if protection against a captured Telegram account matters.
 
+If the receiving integration needs a useful final filename, append `/SAFE_NAME` after the token without changing the CLI or Worker request. For example:
+
+```text
+https://keydrop.YOUR-SUBDOMAIN.workers.dev/#TOKEN/phone-eu4-v0.7.1.toml
+```
+
+After one URL decode, `SAFE_NAME` must match `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`. Do not accept a path, slash, backslash, leading punctuation, additional fragment segment, or user-supplied extension outside this grammar. The suffix is fragment-only and never reaches the Worker; it changes only the browser-side `File` name. A token-only URL remains valid and selects `delivery.enc`.
+
 ## 5. Automated send
 
 The automation uses the same CLI. Gate the generator before upload: a failing producer must not upload empty or partial output. A unique mode-`0700` job directory also gives every O_EXCL password path and bearer URL a fresh name:
@@ -180,12 +188,12 @@ This reliable gate briefly writes plaintext into the private job directory. Clea
 ## 6. Recipient flow
 
 1. Open the URL in Brave or Fennec.
-2. The fragment is removed from browser history immediately.
+2. A valid token and optional safe filename are removed from browser history immediately.
 3. The page loads ciphertext directly into memory; Android's file picker is not used.
-4. Enter the separately received password and decrypt.
+4. Enter the separately received password and decrypt. A named link saves the decrypted file with that name and extension; a legacy token-only link uses `delivery`.
 5. If Android or the embedded browser does not preserve the decrypted download, open the original URL from Telegram again and retry before its TTL expires.
 
-The fragment is retained only in page memory and, when available, `sessionStorage`; the original Telegram message is the recoverable copy of the capability URL. Independent browser sessions may claim and download the same ciphertext until the fixed TTL. If browser storage or an embedded WebView loses local state, reopen that original URL rather than merely refreshing the stripped page. The legacy ACK endpoint returns `409` without deleting anything so an already-open old page cannot destroy a repeatable delivery. Only the upload-authenticated revoke path used by trusted operations can remove it early. A `410` means the drop expired, was explicitly revoked, or its backing object is unavailable.
+The validated token, lease, and filename are retained only in page memory and, when available, `sessionStorage`; the original Telegram message is the recoverable copy of the capability URL. Independent browser sessions may claim and download the same ciphertext until the fixed TTL. If browser storage or an embedded WebView loses local state, reopen that original URL rather than merely refreshing the stripped page. The legacy ACK endpoint returns `409` without deleting anything so an already-open old page cannot destroy a repeatable delivery. Only the upload-authenticated revoke path used by trusted operations can remove it early. A `410` means the drop expired, was explicitly revoked, or its backing object is unavailable.
 
 ## 7. Rotation, rollback, and cleanup
 
